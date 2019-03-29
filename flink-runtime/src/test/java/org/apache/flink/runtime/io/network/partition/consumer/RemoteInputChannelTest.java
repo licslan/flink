@@ -23,6 +23,7 @@ import org.apache.flink.runtime.execution.CancelTaskException;
 import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.ConnectionManager;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
+import org.apache.flink.runtime.io.network.buffer.BufferListener.NotificationResult;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
 import org.apache.flink.runtime.io.network.netty.PartitionRequestClient;
@@ -32,7 +33,7 @@ import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.util.TestBufferFactory;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
-import org.apache.flink.runtime.taskmanager.TaskActions;
+import org.apache.flink.runtime.taskmanager.NoOpTaskActions;
 import org.apache.flink.util.ExceptionUtils;
 
 import org.apache.flink.shaded.guava18.com.google.common.collect.Lists;
@@ -150,7 +151,10 @@ public class RemoteInputChannelTest {
 						for (int j = 0; j < 128; j++) {
 							// this is the same buffer over and over again which will be
 							// recycled by the RemoteInputChannel
-							function.apply(inputChannel, buffer.retainBuffer(), j);
+							Object obj = function.apply(inputChannel, buffer.retainBuffer(), j);
+							if (obj instanceof NotificationResult && obj == NotificationResult.BUFFER_NOT_USED) {
+								buffer.recycleBuffer();
+							}
 						}
 
 						if (inputChannel.isReleased()) {
@@ -1037,7 +1041,7 @@ public class RemoteInputChannelTest {
 			ResultPartitionType.PIPELINED,
 			0,
 			1,
-			mock(TaskActions.class),
+			new NoOpTaskActions(),
 			UnregisteredMetricGroups.createUnregisteredTaskMetricGroup().getIOMetricGroup(),
 			true);
 	}

@@ -89,7 +89,7 @@ Internally, Flink makes the following distinctions between types:
 
   * Flink Java Tuples (part of the Flink Java API): max 25 fields, null fields not supported
 
-  * Scala *case classes* (including Scala tuples): max 22 fields, null fields not supported
+  * Scala *case classes* (including Scala tuples): null fields not supported
 
   * Row: tuples with arbitrary number of fields and support for null fields
 
@@ -238,7 +238,7 @@ as possible via reflection, using the few bits that Java preserves (mainly funct
 This logic also contains some simple type inference for cases where the return type of a function depends on its input type:
 
 {% highlight java %}
-public class AppendOne<T> extends MapFunction<T, Tuple2<T, Long>> {
+public class AppendOne<T> implements MapFunction<T, Tuple2<T, Long>> {
 
     public Tuple2<T, Long> map(T value) {
         return new Tuple2<T, Long>(value, 1L);

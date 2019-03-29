@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.entrypoint;
 
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
@@ -33,7 +34,6 @@ import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.TransientBlobCache;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
-import org.apache.flink.runtime.clusterframework.BootstrapTools;
 import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.dispatcher.ArchivedExecutionGraphStore;
@@ -46,16 +46,21 @@ import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServicesUtils;
 import org.apache.flink.runtime.metrics.MetricRegistryConfiguration;
 import org.apache.flink.runtime.metrics.MetricRegistryImpl;
+import org.apache.flink.runtime.metrics.util.MetricUtils;
 import org.apache.flink.runtime.resourcemanager.ResourceManager;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
-import org.apache.flink.runtime.rpc.akka.AkkaRpcService;
+import org.apache.flink.runtime.rpc.akka.AkkaRpcServiceUtils;
 import org.apache.flink.runtime.security.SecurityConfiguration;
 import org.apache.flink.runtime.security.SecurityContext;
 import org.apache.flink.runtime.security.SecurityUtils;
+import org.apache.flink.runtime.util.ExecutorThreadFactory;
+import org.apache.flink.runtime.util.Hardware;
 import org.apache.flink.runtime.util.ZooKeeperUtils;
+import org.apache.flink.runtime.webmonitor.retriever.impl.AkkaQueryServiceRetriever;
 import org.apache.flink.util.AutoCloseableAsync;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ShutdownHookUtil;
@@ -64,6 +69,7 @@ import akka.actor.ActorSystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
@@ -78,11 +84,11 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import scala.concurrent.duration.FiniteDuration;
 
 /**
  * Base class for the Flink cluster entry points.
@@ -128,6 +134,12 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 
 	@GuardedBy("lock")
 	private RpcService commonRpcService;
+
+	@GuardedBy("lock")
+	private ExecutorService ioExecutor;
+
+	@GuardedBy("lock")
+	private ActorSystem metricQueryServiceActorSystem;
 
 	@GuardedBy("lock")
 	private ArchivedExecutionGraphStore archivedExecutionGraphStore;
@@ -217,6 +229,9 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 				heartbeatServices,
 				metricRegistry,
 				archivedExecutionGraphStore,
+				new AkkaQueryServiceRetriever(
+					metricQueryServiceActorSystem,
+					Time.milliseconds(configuration.getLong(WebOptions.TIMEOUT))),
 				this);
 
 			clusterComponent.getShutDownFuture().whenComplete(
@@ -252,16 +267,19 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 			configuration.setString(JobManagerOptions.ADDRESS, commonRpcService.getAddress());
 			configuration.setInteger(JobManagerOptions.PORT, commonRpcService.getPort());
 
-			haServices = createHaServices(configuration, commonRpcService.getExecutor());
+			ioExecutor = Executors.newFixedThreadPool(
+				Hardware.getNumberCPUCores(),
+				new ExecutorThreadFactory("cluster-io"));
+			haServices = createHaServices(configuration, ioExecutor);
 			blobServer = new BlobServer(configuration, haServices.createBlobStore());
 			blobServer.start();
 			heartbeatServices = createHeartbeatServices(configuration);
 			metricRegistry = createMetricRegistry(configuration);
 
 			// TODO: This is a temporary hack until we have ported the MetricQueryService to the new RpcEndpoint
-			// start the MetricQueryService
-			final ActorSystem actorSystem = ((AkkaRpcService) commonRpcService).getActorSystem();
-			metricRegistry.startQueryService(actorSystem, null);
+			// Start actor system for metric query service on any available port
+			metricQueryServiceActorSystem = MetricUtils.startMetricsActorSystem(configuration, bindAddress, LOG);
+			metricRegistry.startQueryService(metricQueryServiceActorSystem, null);
 
 			archivedExecutionGraphStore = createSerializableExecutionGraphStore(configuration, commonRpcService.getScheduledExecutor());
 
@@ -271,6 +289,11 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 					commonRpcService.getAddress(),
 					blobServer.getPort()));
 		}
+	}
+
+	@Nonnull
+	private RpcService createRpcService(Configuration configuration, String bindAddress, String portRange) throws Exception {
+		return AkkaRpcServiceUtils.createRpcService(bindAddress, portRange, configuration);
 	}
 
 	/**
@@ -285,15 +308,6 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 		} else {
 			return String.valueOf(configuration.getInteger(JobManagerOptions.PORT));
 		}
-	}
-
-	protected RpcService createRpcService(
-			Configuration configuration,
-			String bindAddress,
-			String portRange) throws Exception {
-		ActorSystem actorSystem = BootstrapTools.startActorSystem(configuration, bindAddress, portRange, LOG);
-		FiniteDuration duration = AkkaUtils.getTimeout(configuration);
-		return new AkkaRpcService(actorSystem, Time.of(duration.length(), duration.unit()));
 	}
 
 	protected HighAvailabilityServices createHaServices(
@@ -322,6 +336,8 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 	}
 
 	protected CompletableFuture<Void> stopClusterServices(boolean cleanupHaData) {
+		final long shutdownTimeout = configuration.getLong(ClusterOptions.CLUSTER_SERVICES_SHUTDOWN_TIMEOUT);
+
 		synchronized (lock) {
 			Throwable exception = null;
 
@@ -365,6 +381,14 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 
 			if (metricRegistry != null) {
 				terminationFutures.add(metricRegistry.shutdown());
+			}
+
+			if (metricQueryServiceActorSystem != null) {
+				terminationFutures.add(AkkaUtils.terminateActorSystem(metricQueryServiceActorSystem));
+			}
+
+			if (ioExecutor != null) {
+				terminationFutures.add(ExecutorUtils.nonBlockingShutdown(shutdownTimeout, TimeUnit.MILLISECONDS, ioExecutor));
 			}
 
 			if (commonRpcService != null) {
@@ -445,9 +469,7 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
 	private CompletableFuture<Void> closeClusterComponent(ApplicationStatus applicationStatus, @Nullable String diagnostics) {
 		synchronized (lock) {
 			if (clusterComponent != null) {
-				final CompletableFuture<Void> deregisterApplicationFuture = clusterComponent.deregisterApplication(applicationStatus, diagnostics);
-
-				return FutureUtils.runAfterwards(deregisterApplicationFuture, clusterComponent::closeAsync);
+				return clusterComponent.deregisterApplicationAndClose(applicationStatus, diagnostics);
 			} else {
 				return CompletableFuture.completedFuture(null);
 			}

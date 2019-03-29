@@ -17,7 +17,8 @@
 (ns jepsen.flink.utils
   (:require [clojure.tools.logging :refer :all]
             [jepsen
-             [control :as c]]
+             [control :as c]
+             [util :refer [meh]]]
             [jepsen.os.debian :as debian]))
 
 (defn retry
@@ -34,7 +35,7 @@
           :or   {on-retry (fn [exception attempt] (warn "Retryable operation failed:"
                                                         (.getMessage exception)))
                  success  identity
-                 fallback :default
+                 fallback #(throw %)
                  retries  10
                  delay    2000}
           :as   keys}]
@@ -49,6 +50,24 @@
          (Thread/sleep delay)
          (recur op (assoc keys :retries (dec retries))))
        (success r)))))
+
+(defn join-space
+  [& tokens]
+  (clojure.string/join " " tokens))
+
+(defn find-files!
+  "Lists files recursively given a directory. If the directory does not exist, an empty collection
+  is returned."
+  [dir]
+  (let [files (try
+                (c/exec :find dir :-type :f)
+                (catch Exception e
+                  (if (.contains (.getMessage e) "No such file or directory")
+                    ""
+                    (throw e))))]
+    (->>
+      (clojure.string/split files #"\n")
+      (remove clojure.string/blank?))))
 
 ;;; runit process supervisor (http://smarden.org/runit/)
 
@@ -86,4 +105,7 @@
   []
   (info "Stop all supervised services.")
   (c/su
-    (c/exec :rm :-f (c/lit (str "/etc/service/*")))))
+    ;; HACK:
+    ;; Remove all symlinks in /etc/service except sshd.
+    ;; This is only relevant when tests are run in Docker because there sshd is started using runit.
+    (meh (c/exec :find (c/lit (str "/etc/service -maxdepth 1 -type l ! -name 'sshd' -delete"))))))

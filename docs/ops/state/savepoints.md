@@ -44,7 +44,7 @@ In contrast to all this, Savepoints are created, owned, and deleted by the user.
 changing parallelism, forking a second job like for a red/blue deployment, and so on. Of course, Savepoints must survive job termination. Conceptually, Savepoints can be a bit more expensive to produce and restore and focus
 more on portability and support for the previously mentioned changes to the job.
 
-Those conceptual differences aside, the current implementations of Checkpoints and Savepoints are basically using the same code and produce the same „format". However, there is currently one exception from this, and we might
+Those conceptual differences aside, the current implementations of Checkpoints and Savepoints are basically using the same code and produce the same format. However, there is currently one exception from this, and we might
 introduce more differences in the future. The exception are incremental checkpoints with the RocksDB state backend. They are using some RocksDB internal format instead of Flink’s native savepoint format. This makes them the
 first instance of a more lightweight checkpointing mechanism, compared to Savepoints.
 
@@ -117,6 +117,11 @@ Please follow <a href="https://issues.apache.org/jira/browse/FLINK-5778">FLINK-5
 </div>
 
 Note that if you use the `MemoryStateBackend`, metadata *and* savepoint state will be stored in the `_metadata` file. Since it is self-contained, you may move the file and restore from any location.
+
+<div class="alert alert-warning">
+  <strong>Attention:</strong> It is discouraged to move or delete the last savepoint of a running job, because this might interfere with failure-recovery. Savepoints have side-effects on exactly-once sinks, therefore 
+  to ensure exactly-once semantics, if there is no checkpoint after the last savepoint, the savepoint will be used for recovery. 
+</div>
 
 #### Trigger a Savepoint
 

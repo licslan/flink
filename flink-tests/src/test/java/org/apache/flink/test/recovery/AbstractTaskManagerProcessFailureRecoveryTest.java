@@ -18,18 +18,21 @@
 
 package org.apache.flink.test.recovery;
 
+import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.AkkaOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HeartbeatManagerOptions;
+import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.entrypoint.StandaloneSessionClusterEntrypoint;
 import org.apache.flink.runtime.taskexecutor.TaskManagerRunner;
-import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.runtime.util.BlobServerResource;
-import org.apache.flink.util.NetUtils;
+import org.apache.flink.runtime.zookeeper.ZooKeeperResource;
+import org.apache.flink.test.util.TestProcessBuilder;
+import org.apache.flink.test.util.TestProcessBuilder.TestProcess;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Rule;
@@ -38,13 +41,14 @@ import org.junit.rules.TemporaryFolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.StringWriter;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.getCurrentClasspath;
 import static org.apache.flink.runtime.testutils.CommonTestUtils.getJavaCommandPath;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
@@ -76,31 +80,33 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 	@Rule
 	public final BlobServerResource blobServerResource = new BlobServerResource();
 
+	@Rule
+	public final ZooKeeperResource zooKeeperResource = new ZooKeeperResource();
+
 	@Test
 	public void testTaskManagerProcessFailure() throws Exception {
 
-		final StringWriter processOutput1 = new StringWriter();
-		final StringWriter processOutput2 = new StringWriter();
-		final StringWriter processOutput3 = new StringWriter();
-
-		Process taskManagerProcess1 = null;
-		Process taskManagerProcess2 = null;
-		Process taskManagerProcess3 = null;
+		TestProcess taskManagerProcess1 = null;
+		TestProcess taskManagerProcess2 = null;
+		TestProcess taskManagerProcess3 = null;
 
 		File coordinateTempDir = null;
 
-		final int jobManagerPort = NetUtils.getAvailablePort();
-		final int restPort = NetUtils.getAvailablePort();
+		Configuration config = new Configuration();
+		config.setString(AkkaOptions.ASK_TIMEOUT, "100 s");
+		config.setString(JobManagerOptions.ADDRESS, "localhost");
+		config.setString(RestOptions.BIND_PORT, "0");
+		config.setLong(HeartbeatManagerOptions.HEARTBEAT_INTERVAL, 500L);
+		config.setLong(HeartbeatManagerOptions.HEARTBEAT_TIMEOUT, 10000L);
+		config.setString(HighAvailabilityOptions.HA_MODE, "zookeeper");
+		config.setString(HighAvailabilityOptions.HA_ZOOKEEPER_QUORUM, zooKeeperResource.getConnectString());
+		config.setString(HighAvailabilityOptions.HA_STORAGE_PATH, temporaryFolder.newFolder().getAbsolutePath());
+		config.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, 2);
+		config.setString(TaskManagerOptions.MANAGED_MEMORY_SIZE, "4m");
+		config.setInteger(TaskManagerOptions.NETWORK_NUM_BUFFERS, 100);
 
-		Configuration jmConfig = new Configuration();
-		jmConfig.setString(AkkaOptions.ASK_TIMEOUT, "100 s");
-		jmConfig.setString(JobManagerOptions.ADDRESS, "localhost");
-		jmConfig.setInteger(JobManagerOptions.PORT, jobManagerPort);
-		jmConfig.setLong(HeartbeatManagerOptions.HEARTBEAT_INTERVAL, 500L);
-		jmConfig.setLong(HeartbeatManagerOptions.HEARTBEAT_TIMEOUT, 10000L);
-		jmConfig.setInteger(RestOptions.PORT, restPort);
+		try (final StandaloneSessionClusterEntrypoint clusterEntrypoint = new StandaloneSessionClusterEntrypoint(config)) {
 
-		try (final StandaloneSessionClusterEntrypoint clusterEntrypoint = new StandaloneSessionClusterEntrypoint(jmConfig)) {
 			// check that we run this test only if the java command
 			// is available on this machine
 			String javaCommand = getJavaCommandPath();
@@ -109,32 +115,18 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 				return;
 			}
 
-			// create a logging file for the process
-			File tempLogFile = File.createTempFile(getClass().getSimpleName() + "-", "-log4j.properties");
-			tempLogFile.deleteOnExit();
-			CommonTestUtils.printLog4jDebugConfig(tempLogFile);
+			clusterEntrypoint.startCluster();
 
 			// coordination between the processes goes through a directory
 			coordinateTempDir = temporaryFolder.newFolder();
 
-			clusterEntrypoint.startCluster();
+			TestProcessBuilder taskManagerProcessBuilder = new TestProcessBuilder(TaskExecutorProcessEntryPoint.class.getName());
 
-			// the TaskManager java command
-			String[] command = new String[] {
-					javaCommand,
-					"-Dlog.level=DEBUG",
-					"-Dlog4j.configuration=file:" + tempLogFile.getAbsolutePath(),
-					"-Xms80m", "-Xmx80m",
-					"-classpath", getCurrentClasspath(),
-					TaskExecutorProcessEntryPoint.class.getName(),
-					String.valueOf(jobManagerPort)
-			};
+			taskManagerProcessBuilder.addConfigAsMainClassArgs(config);
 
 			// start the first two TaskManager processes
-			taskManagerProcess1 = new ProcessBuilder(command).start();
-			new CommonTestUtils.PipeForwarder(taskManagerProcess1.getErrorStream(), processOutput1);
-			taskManagerProcess2 = new ProcessBuilder(command).start();
-			new CommonTestUtils.PipeForwarder(taskManagerProcess2.getErrorStream(), processOutput2);
+			taskManagerProcess1 = taskManagerProcessBuilder.start();
+			taskManagerProcess2 = taskManagerProcessBuilder.start();
 
 			// the program will set a marker file in each of its parallel tasks once they are ready, so that
 			// this coordinating code is aware of this.
@@ -148,7 +140,7 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 				@Override
 				public void run() {
 					try {
-						testTaskManagerFailure(restPort, coordinateDirClosure);
+						testTaskManagerFailure(config, coordinateDirClosure);
 					}
 					catch (Throwable t) {
 						t.printStackTrace();
@@ -176,8 +168,7 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 			}
 
 			// start the third TaskManager
-			taskManagerProcess3 = new ProcessBuilder(command).start();
-			new CommonTestUtils.PipeForwarder(taskManagerProcess3.getErrorStream(), processOutput3);
+			taskManagerProcess3 = taskManagerProcessBuilder.start();
 
 			// kill one of the previous TaskManagers, triggering a failure and recovery
 			taskManagerProcess1.destroy();
@@ -203,16 +194,16 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 		}
 		catch (Exception e) {
 			e.printStackTrace();
-			printProcessLog("TaskManager 1", processOutput1.toString());
-			printProcessLog("TaskManager 2", processOutput2.toString());
-			printProcessLog("TaskManager 3", processOutput3.toString());
+			printProcessLog("TaskManager 1", taskManagerProcess1.getOutput().toString());
+			printProcessLog("TaskManager 2", taskManagerProcess1.getOutput().toString());
+			printProcessLog("TaskManager 3", taskManagerProcess1.getOutput().toString());
 			fail(e.getMessage());
 		}
 		catch (Error e) {
 			e.printStackTrace();
-			printProcessLog("TaskManager 1", processOutput1.toString());
-			printProcessLog("TaskManager 2", processOutput2.toString());
-			printProcessLog("TaskManager 3", processOutput3.toString());
+			printProcessLog("TaskManager 1", taskManagerProcess1.getOutput().toString());
+			printProcessLog("TaskManager 2", taskManagerProcess1.getOutput().toString());
+			printProcessLog("TaskManager 3", taskManagerProcess1.getOutput().toString());
 			throw e;
 		}
 		finally {
@@ -225,6 +216,22 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 			if (taskManagerProcess3 != null) {
 				taskManagerProcess3.destroy();
 			}
+
+			waitForShutdown("TaskManager 1", taskManagerProcess1);
+			waitForShutdown("TaskManager 2", taskManagerProcess2);
+			waitForShutdown("TaskManager 3", taskManagerProcess3);
+		}
+	}
+
+	private void waitForShutdown(final String processName, @Nullable final TestProcess process) throws InterruptedException {
+		if (process == null) {
+			return;
+		}
+
+		if (!process.getProcess().waitFor(30, TimeUnit.SECONDS)) {
+			log.error("{} did not shutdown in time.", processName);
+			printProcessLog(processName, process.getOutput().toString());
+			process.getProcess().destroyForcibly();
 		}
 	}
 
@@ -232,11 +239,11 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 	 * The test program should be implemented here in a form of a separate thread.
 	 * This provides a solution for checking that it has been terminated.
 	 *
-	 * @param jobManagerPort The port for submitting the topology to the local cluster
+	 * @param configuration the config to use
 	 * @param coordinateDir TaskManager failure will be triggered only after processes
 	 *                             have successfully created file under this directory
 	 */
-	public abstract void testTaskManagerFailure(int jobManagerPort, File coordinateDir) throws Exception;
+	public abstract void testTaskManagerFailure(Configuration configuration, File coordinateDir) throws Exception;
 
 	protected static void printProcessLog(String processName, String log) {
 		if (log == null || log.length() == 0) {
@@ -306,15 +313,8 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
 
 		public static void main(String[] args) {
 			try {
-				int jobManagerPort = Integer.parseInt(args[0]);
-
-				Configuration cfg = new Configuration();
-				cfg.setString(JobManagerOptions.ADDRESS, "localhost");
-				cfg.setInteger(JobManagerOptions.PORT, jobManagerPort);
-				cfg.setString(TaskManagerOptions.MANAGED_MEMORY_SIZE, "4m");
-				cfg.setInteger(TaskManagerOptions.NETWORK_NUM_BUFFERS, 100);
-				cfg.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, 2);
-				cfg.setString(AkkaOptions.ASK_TIMEOUT, "100 s");
+				final ParameterTool parameterTool = ParameterTool.fromArgs(args);
+				Configuration cfg = parameterTool.getConfiguration();
 
 				TaskManagerRunner.runTaskManager(cfg, ResourceID.generate());
 			}

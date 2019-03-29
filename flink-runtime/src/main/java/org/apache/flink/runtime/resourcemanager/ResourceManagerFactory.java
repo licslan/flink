@@ -25,10 +25,13 @@ import org.apache.flink.runtime.entrypoint.ClusterInformation;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.metrics.MetricRegistry;
+import org.apache.flink.runtime.metrics.groups.JobManagerMetricGroup;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
 
 import javax.annotation.Nullable;
+
+import java.util.UUID;
 
 /**
  * {@link ResourceManager} factory.
@@ -46,5 +49,14 @@ public interface ResourceManagerFactory<T extends ResourceIDRetrievable> {
 		MetricRegistry metricRegistry,
 		FatalErrorHandler fatalErrorHandler,
 		ClusterInformation clusterInformation,
-		@Nullable String webInterfaceUrl) throws Exception;
+		@Nullable String webInterfaceUrl,
+		JobManagerMetricGroup jobManagerMetricGroup) throws Exception;
+
+	default String generateEndpointIdWithUUID() {
+		return getEndpointId() + UUID.randomUUID();
+	}
+
+	default String getEndpointId() {
+		return ResourceManager.RESOURCE_MANAGER_NAME;
+	}
 }

@@ -20,7 +20,6 @@ package org.apache.flink.runtime.taskexecutor;
 
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.CheckpointingOptions;
-import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.IllegalConfigurationException;
@@ -29,15 +28,17 @@ import org.apache.flink.configuration.QueryableStateOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.memory.MemoryType;
 import org.apache.flink.runtime.akka.AkkaUtils;
-import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.network.netty.NettyConfig;
 import org.apache.flink.runtime.memory.MemoryManager;
+import org.apache.flink.runtime.registration.RetryingRegistrationConfiguration;
 import org.apache.flink.runtime.taskmanager.NetworkEnvironmentConfiguration;
 import org.apache.flink.util.MathUtils;
 import org.apache.flink.util.NetUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -66,6 +67,7 @@ public class TaskManagerServicesConfiguration {
 
 	private final NetworkEnvironmentConfiguration networkConfig;
 
+	@Nullable
 	private final QueryableStateConfiguration queryableStateConfig;
 
 	/**
@@ -85,6 +87,8 @@ public class TaskManagerServicesConfiguration {
 
 	private final boolean localRecoveryEnabled;
 
+	private final RetryingRegistrationConfiguration retryingRegistrationConfiguration;
+
 	private Optional<Time> systemResourceMetricsProbingInterval;
 
 	public TaskManagerServicesConfiguration(
@@ -93,13 +97,14 @@ public class TaskManagerServicesConfiguration {
 			String[] localRecoveryStateRootDirectories,
 			boolean localRecoveryEnabled,
 			NetworkEnvironmentConfiguration networkConfig,
-			QueryableStateConfiguration queryableStateConfig,
+			@Nullable QueryableStateConfiguration queryableStateConfig,
 			int numberOfSlots,
 			long configuredMemory,
 			MemoryType memoryType,
 			boolean preAllocateMemory,
 			float memoryFraction,
 			long timerServiceShutdownTimeout,
+			RetryingRegistrationConfiguration retryingRegistrationConfiguration,
 			Optional<Time> systemResourceMetricsProbingInterval) {
 
 		this.taskManagerAddress = checkNotNull(taskManagerAddress);
@@ -107,7 +112,7 @@ public class TaskManagerServicesConfiguration {
 		this.localRecoveryStateRootDirectories = checkNotNull(localRecoveryStateRootDirectories);
 		this.localRecoveryEnabled = checkNotNull(localRecoveryEnabled);
 		this.networkConfig = checkNotNull(networkConfig);
-		this.queryableStateConfig = checkNotNull(queryableStateConfig);
+		this.queryableStateConfig = queryableStateConfig;
 		this.numberOfSlots = checkNotNull(numberOfSlots);
 
 		this.configuredMemory = configuredMemory;
@@ -118,6 +123,7 @@ public class TaskManagerServicesConfiguration {
 		checkArgument(timerServiceShutdownTimeout >= 0L, "The timer " +
 			"service shutdown timeout must be greater or equal to 0.");
 		this.timerServiceShutdownTimeout = timerServiceShutdownTimeout;
+		this.retryingRegistrationConfiguration = checkNotNull(retryingRegistrationConfiguration);
 
 		this.systemResourceMetricsProbingInterval = checkNotNull(systemResourceMetricsProbingInterval);
 	}
@@ -188,6 +194,10 @@ public class TaskManagerServicesConfiguration {
 
 	public Optional<Time> getSystemResourceMetricsProbingInterval() {
 		return systemResourceMetricsProbingInterval;
+	}
+
+	public RetryingRegistrationConfiguration getRetryingRegistrationConfiguration() {
+		return retryingRegistrationConfiguration;
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -275,6 +285,8 @@ public class TaskManagerServicesConfiguration {
 
 		long timerServiceShutdownTimeout = AkkaUtils.getTimeout(configuration).toMillis();
 
+		final RetryingRegistrationConfiguration retryingRegistrationConfiguration = RetryingRegistrationConfiguration.fromConfiguration(configuration);
+
 		return new TaskManagerServicesConfiguration(
 			remoteAddress,
 			tmpDirs,
@@ -288,6 +300,7 @@ public class TaskManagerServicesConfiguration {
 			preAllocateMemory,
 			memoryFraction,
 			timerServiceShutdownTimeout,
+			retryingRegistrationConfiguration,
 			ConfigurationUtils.getSystemResourceMetricsProbingInterval(configuration));
 	}
 
@@ -364,18 +377,6 @@ public class TaskManagerServicesConfiguration {
 			nettyConfig = null;
 		}
 
-		// Default spill I/O mode for intermediate results
-		final String syncOrAsync = configuration.getString(
-			ConfigConstants.TASK_MANAGER_NETWORK_DEFAULT_IO_MODE,
-			ConfigConstants.DEFAULT_TASK_MANAGER_NETWORK_DEFAULT_IO_MODE);
-
-		final IOManager.IOMode ioMode;
-		if (syncOrAsync.equals("async")) {
-			ioMode = IOManager.IOMode.ASYNC;
-		} else {
-			ioMode = IOManager.IOMode.SYNC;
-		}
-
 		int initialRequestBackoff = configuration.getInteger(
 			TaskManagerOptions.NETWORK_REQUEST_BACKOFF_INITIAL);
 		int maxRequestBackoff = configuration.getInteger(
@@ -391,7 +392,6 @@ public class TaskManagerServicesConfiguration {
 			networkBufMin,
 			networkBufMax,
 			pageSize,
-			ioMode,
 			initialRequestBackoff,
 			maxRequestBackoff,
 			buffersPerChannel,
@@ -466,6 +466,9 @@ public class TaskManagerServicesConfiguration {
 	 * Creates the {@link QueryableStateConfiguration} from the given Configuration.
 	 */
 	private static QueryableStateConfiguration parseQueryableStateConfiguration(Configuration config) {
+		if (!config.getBoolean(QueryableStateOptions.ENABLE_QUERYABLE_STATE_PROXY_SERVER)) {
+			return null;
+		}
 
 		final Iterator<Integer> proxyPorts = NetUtils.getPortRangeFromString(
 				config.getString(QueryableStateOptions.PROXY_PORT_RANGE));
