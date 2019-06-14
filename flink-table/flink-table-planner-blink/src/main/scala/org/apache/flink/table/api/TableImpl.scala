@@ -21,7 +21,8 @@ package org.apache.flink.table.api
 import org.apache.flink.table.calcite.FlinkTypeFactory._
 import org.apache.flink.table.expressions.Expression
 import org.apache.flink.table.functions.TemporalTableFunction
-import org.apache.flink.table.`type`.TypeConverters.createInternalTypeInfoFromInternalType
+import org.apache.flink.table.operations.QueryOperation
+import org.apache.flink.table.types.LogicalTypeDataTypeConverter.fromLogicalTypeToDataType
 
 import org.apache.calcite.rel.RelNode
 
@@ -42,12 +43,11 @@ class TableImpl(val tableEnv: TableEnvironment, relNode: RelNode) extends Table 
 
   private lazy val tableSchema: TableSchema = {
     val rowType = relNode.getRowType
-    val fieldNames = rowType.getFieldList.map(_.getName)
-    val fieldTypes = rowType.getFieldList map { tp =>
-      val internalType = toInternalType(tp.getType)
-      createInternalTypeInfoFromInternalType(internalType)
+    val builder = TableSchema.builder()
+    rowType.getFieldList.foreach { field =>
+      builder.field(field.getName, fromLogicalTypeToDataType(toLogicalType(field.getType)))
     }
-    new TableSchema(fieldNames.toArray, fieldTypes.toArray)
+    builder.build()
   }
 
   /**
@@ -169,7 +169,12 @@ class TableImpl(val tableEnv: TableEnvironment, relNode: RelNode) extends Table 
 
   override def fetch(fetch: Int): Table = ???
 
-  override def insertInto(tableName: String): Unit = ???
+  override def insertInto(tablePath: String, tablePathContinued: String*): Unit = ???
+
+  override def insertInto(
+    conf: QueryConfig,
+    tablePath: String,
+    tablePathContinued: String*): Unit = ???
 
   override def insertInto(
     tableName: String,
@@ -178,4 +183,38 @@ class TableImpl(val tableEnv: TableEnvironment, relNode: RelNode) extends Table 
   override def window(groupWindow: GroupWindow): GroupWindowedTable = ???
 
   override def window(overWindows: OverWindow*): OverWindowedTable = ???
+
+  override def addColumns(fields: String): Table = ???
+
+  override def addColumns(fields: Expression*): Table = ???
+
+  override def addOrReplaceColumns(fields: String): Table = ???
+
+  override def addOrReplaceColumns(fields: Expression*): Table = ???
+
+  override def renameColumns(fields: String): Table = ???
+
+  override def renameColumns(fields: Expression*): Table = ???
+
+  override def dropColumns(fields: String): Table = ???
+
+  override def dropColumns(fields: Expression*): Table = ???
+
+  override def map(mapFunction: String): Table = ???
+
+  override def map(mapFunction: Expression): Table = ???
+
+  override def flatMap(tableFunction: String): Table = ???
+
+  override def flatMap(tableFunction: Expression): Table = ???
+
+  override def getQueryOperation: QueryOperation = ???
+
+  override def aggregate(aggregateFunction: String): AggregatedTable = ???
+
+  override def aggregate(aggregateFunction: Expression): AggregatedTable = ???
+
+  override def flatAggregate(tableAggregateFunction: String): FlatAggregateTable = ???
+
+  override def flatAggregate(tableAggregateFunction: Expression): FlatAggregateTable = ???
 }

@@ -35,7 +35,7 @@ import org.junit.Test
 class AggregateTest extends TableTestBase {
 
   private val streamUtil: StreamTableTestUtil = streamTestUtil()
-  streamUtil.addTable[(Int, String, Long)](
+  private val table = streamUtil.addTable[(Int, String, Long)](
     "MyTable", 'a, 'b, 'c, 'proctime.proctime, 'rowtime.rowtime)
 
   @Test
@@ -49,7 +49,7 @@ class AggregateTest extends TableTestBase {
           "DataStreamGroupAggregate",
           unaryNode(
             "DataStreamCalc",
-            streamTableNode(0),
+            streamTableNode(table),
             term("select", "b", "a")
           ),
           term("groupBy", "b"),
@@ -66,7 +66,7 @@ class AggregateTest extends TableTestBase {
     val aggFunctionDefinition = streamUtil
       .tableEnv
       .functionCatalog
-      .lookupFunction("udag")
+      .lookupFunction("udag").get()
       .asInstanceOf[AggregateFunctionDefinition]
 
     val typeInfo = aggFunctionDefinition.getAccumulatorTypeInfo
@@ -80,7 +80,7 @@ class AggregateTest extends TableTestBase {
     val aggFunctionDefinition2 = streamUtil
       .tableEnv
       .functionCatalog
-      .lookupFunction("udag2")
+      .lookupFunction("udag2").get()
       .asInstanceOf[AggregateFunctionDefinition]
 
     val typeInfo2 = aggFunctionDefinition2.getAccumulatorTypeInfo

@@ -19,7 +19,7 @@
 package org.apache.flink.table.expressions;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.table.api.Table;
+import org.apache.flink.table.operations.QueryOperation;
 import org.apache.flink.util.Preconditions;
 
 import java.util.Collections;
@@ -35,19 +35,19 @@ import java.util.Objects;
 public final class TableReferenceExpression implements Expression {
 
 	private final String name;
-	private final Table table;
+	private final QueryOperation queryOperation;
 
-	public TableReferenceExpression(String name, Table table) {
+	public TableReferenceExpression(String name, QueryOperation queryOperation) {
 		this.name = Preconditions.checkNotNull(name);
-		this.table = Preconditions.checkNotNull(table);
+		this.queryOperation = Preconditions.checkNotNull(queryOperation);
 	}
 
 	public String getName() {
 		return name;
 	}
 
-	public Table getTable() {
-		return table;
+	public QueryOperation getQueryOperation() {
+		return queryOperation;
 	}
 
 	@Override
@@ -69,12 +69,13 @@ public final class TableReferenceExpression implements Expression {
 			return false;
 		}
 		TableReferenceExpression that = (TableReferenceExpression) o;
-		return Objects.equals(name, that.name) && Objects.equals(table, that.table);
+		return Objects.equals(name, that.name) &&
+			Objects.equals(queryOperation, that.queryOperation);
 	}
 
 	@Override
 	public int hashCode() {
-		return Objects.hash(name, table);
+		return Objects.hash(name, queryOperation);
 	}
 
 	@Override

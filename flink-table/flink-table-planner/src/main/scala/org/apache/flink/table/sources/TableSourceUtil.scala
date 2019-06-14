@@ -31,7 +31,8 @@ import org.apache.flink.api.common.typeinfo.{SqlTimeTypeInfo, TypeInformation}
 import org.apache.flink.api.common.typeutils.CompositeType
 import org.apache.flink.table.api.{TableException, Types, ValidationException}
 import org.apache.flink.table.calcite.FlinkTypeFactory
-import org.apache.flink.table.expressions.{Cast, PlannerExpression, ResolvedFieldReference}
+import org.apache.flink.table.expressions.{Cast, PlannerExpression, PlannerResolvedFieldReference, ResolvedFieldReference}
+import org.apache.flink.table.types.utils.TypeConversions.fromDataTypeToLegacyInfo
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo
 
 import scala.collection.JavaConverters._
@@ -95,9 +96,10 @@ object TableSourceUtil {
         mappedFieldCnt += 1
     }
     // ensure that only one field is mapped to an atomic type
-    if (!tableSource.getReturnType.isInstanceOf[CompositeType[_]] && mappedFieldCnt > 1) {
+    val producedType = fromDataTypeToLegacyInfo(tableSource.getProducedDataType)
+    if (!producedType.isInstanceOf[CompositeType[_]] && mappedFieldCnt > 1) {
       throw new ValidationException(
-        s"More than one table field matched to atomic input type ${tableSource.getReturnType}.")
+        s"More than one table field matched to atomic input type $producedType.")
     }
 
     // validate rowtime attributes
@@ -172,7 +174,7 @@ object TableSourceUtil {
       tableSource: TableSource[_],
       isStreamTable: Boolean,
       selectedFields: Option[Array[Int]]): Array[Int] = {
-    val inputType = tableSource.getReturnType
+    val inputType = fromDataTypeToLegacyInfo(tableSource.getProducedDataType)
     val tableSchema = tableSource.getTableSchema
 
     // get names of selected fields
@@ -374,12 +376,13 @@ object TableSourceUtil {
         // push an empty values node with the physical schema on the relbuilder
         relBuilder.push(createSchemaRelNode(resolvedFields))
         // get extraction expression
-        resolvedFields.map(f => ResolvedFieldReference(f._1, f._3))
+        resolvedFields.map(f => PlannerResolvedFieldReference(f._1, f._3))
       } else {
-        new Array[ResolvedFieldReference](0)
+        new Array[PlannerResolvedFieldReference](0)
       }
 
-      val expression = tsExtractor.getExpression(fieldAccesses)
+      val expression = tsExtractor
+        .getExpression(fieldAccesses.map(_.asInstanceOf[ResolvedFieldReference]))
       // add cast to requested type and convert expression to RexNode
       // TODO we cast to planner expressions as a temporary solution to keep the old interfaces
       val rexExpression = Cast(expression.asInstanceOf[PlannerExpression], resultType)
@@ -464,7 +467,7 @@ object TableSourceUtil {
       fieldName: String,
       tableSource: TableSource[_]): (String, Int, TypeInformation[_]) = {
 
-    val returnType = tableSource.getReturnType
+    val returnType = fromDataTypeToLegacyInfo(tableSource.getProducedDataType)
 
     /** Look up a field by name in a type information */
     def lookupField(fieldName: String, failMsg: String): (String, Int, TypeInformation[_]) = {

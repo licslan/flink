@@ -32,11 +32,6 @@ public abstract class ApiExpressionDefaultVisitor<T> extends ApiExpressionVisito
 	}
 
 	@Override
-	public T visitSymbol(SymbolExpression symbolExpression) {
-		return defaultMethod(symbolExpression);
-	}
-
-	@Override
 	public T visitValueLiteral(ValueLiteralExpression valueLiteralExpression) {
 		return defaultMethod(valueLiteralExpression);
 	}
@@ -47,8 +42,13 @@ public abstract class ApiExpressionDefaultVisitor<T> extends ApiExpressionVisito
 	}
 
 	@Override
-	public T visitUnresolvedField(UnresolvedFieldReferenceExpression fieldReference) {
-		return defaultMethod(fieldReference);
+	public T visitUnresolvedReference(UnresolvedReferenceExpression unresolvedReference) {
+		return defaultMethod(unresolvedReference);
+	}
+
+	@Override
+	public T visitLocalReference(LocalReferenceExpression localReference) {
+		return defaultMethod(localReference);
 	}
 
 	@Override

@@ -22,7 +22,7 @@ import org.apache.flink.table.dataformat.BaseRow;
 import org.apache.flink.table.generated.RecordComparator;
 
 /**
- * Example String {@link RecordComparator}.
+ * Example Int {@link RecordComparator}.
  */
 public class IntRecordComparator implements RecordComparator {
 
@@ -41,4 +41,8 @@ public class IntRecordComparator implements RecordComparator {
 		return 0;
 	}
 
+	@Override
+	public boolean equals(Object obj) {
+		return obj instanceof IntRecordComparator;
+	}
 }

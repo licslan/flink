@@ -18,16 +18,19 @@
 
 package org.apache.flink.table.calcite
 
+import org.apache.flink.table.calcite.FlinkRelFactories.{ExpandFactory, RankFactory, SinkFactory}
 import org.apache.flink.table.expressions.WindowProperty
+import org.apache.flink.table.runtime.rank.{RankRange, RankType}
+import org.apache.flink.table.sinks.TableSink
 
-import org.apache.calcite.config.{CalciteConnectionConfigImpl, CalciteConnectionProperty}
-import org.apache.calcite.jdbc.CalciteSchema
 import org.apache.calcite.plan._
-import org.apache.calcite.plan.volcano.VolcanoPlanner
-import org.apache.calcite.rex.RexBuilder
-import org.apache.calcite.tools.{FrameworkConfig, RelBuilder}
+import org.apache.calcite.rel.RelCollation
+import org.apache.calcite.rel.`type`.{RelDataType, RelDataTypeField}
+import org.apache.calcite.rex.RexNode
+import org.apache.calcite.tools.{RelBuilder, RelBuilderFactory}
+import org.apache.calcite.util.{ImmutableBitSet, Util}
 
-import java.util.{Collections, Properties}
+import java.util
 
 /**
   * Flink specific [[RelBuilder]] that changes the default type factory to a [[FlinkTypeFactory]].
@@ -41,50 +44,57 @@ class FlinkRelBuilder(
     relOptCluster,
     relOptSchema) {
 
-  def getRelOptSchema: RelOptSchema = relOptSchema
+  require(context != null)
 
-  def getPlanner: RelOptPlanner = cluster.getPlanner
+  private val expandFactory: ExpandFactory = {
+    Util.first(context.unwrap(classOf[ExpandFactory]), FlinkRelFactories.DEFAULT_EXPAND_FACTORY)
+  }
+
+  private val rankFactory: RankFactory = {
+    Util.first(context.unwrap(classOf[RankFactory]), FlinkRelFactories.DEFAULT_RANK_FACTORY)
+  }
+
+  private val sinkFactory: SinkFactory = {
+    Util.first(context.unwrap(classOf[SinkFactory]), FlinkRelFactories.DEFAULT_SINK_FACTORY)
+  }
+
+  def getRelOptSchema: RelOptSchema = relOptSchema
 
   def getCluster: RelOptCluster = relOptCluster
 
   override def getTypeFactory: FlinkTypeFactory =
     super.getTypeFactory.asInstanceOf[FlinkTypeFactory]
+
+  def expand(
+      outputRowType: RelDataType,
+      projects: util.List[util.List[RexNode]],
+      expandIdIndex: Int): RelBuilder = {
+    val input = build()
+    val expand = expandFactory.createExpand(input, outputRowType, projects, expandIdIndex)
+    push(expand)
+  }
+
+  def sink(sink: TableSink[_], sinkName: String): RelBuilder = {
+    val input = build()
+    val sinkNode = sinkFactory.createSink(input, sink, sinkName)
+    push(sinkNode)
+  }
+
+  def rank(
+      partitionKey: ImmutableBitSet,
+      orderKey: RelCollation,
+      rankType: RankType,
+      rankRange: RankRange,
+      rankNumberType: RelDataTypeField,
+      outputRankNumber: Boolean): RelBuilder = {
+    val input = build()
+    val rank = rankFactory.createRank(input, partitionKey, orderKey, rankType, rankRange,
+      rankNumberType, outputRankNumber)
+    push(rank)
+  }
 }
 
 object FlinkRelBuilder {
-
-  def create(
-      config: FrameworkConfig,
-      traitDefs: Array[RelTraitDef[_ <: RelTrait]] = Array(ConventionTraitDef.INSTANCE)
-  ): FlinkRelBuilder = {
-
-    // create Flink type factory
-    val typeSystem = config.getTypeSystem
-    val typeFactory = new FlinkTypeFactory(typeSystem)
-
-    // create context instances with Flink type factory
-    val context = config.getContext
-    val planner = new VolcanoPlanner(config.getCostFactory, context)
-    planner.setExecutor(config.getExecutor)
-    traitDefs.foreach(planner.addRelTraitDef)
-
-    val cluster = FlinkRelOptClusterFactory.create(planner, new RexBuilder(typeFactory))
-    val calciteSchema = CalciteSchema.from(config.getDefaultSchema)
-
-    val prop = new Properties()
-    prop.setProperty(
-      CalciteConnectionProperty.CASE_SENSITIVE.camelName,
-      String.valueOf(config.getParserConfig.caseSensitive))
-    val connectionConfig = new CalciteConnectionConfigImpl(prop)
-
-    val relOptSchema = new FlinkCalciteCatalogReader(
-      calciteSchema,
-      Collections.emptyList(),
-      typeFactory,
-      connectionConfig)
-
-    new FlinkRelBuilder(context, cluster, relOptSchema)
-  }
 
   /**
     * Information necessary to create a window aggregate.
@@ -92,4 +102,9 @@ object FlinkRelBuilder {
     * Similar to [[RelBuilder.AggCall]] or [[RelBuilder.GroupKey]].
     */
   case class NamedWindowProperty(name: String, property: WindowProperty)
+
+  def proto(context: Context): RelBuilderFactory = new RelBuilderFactory() {
+    def create(cluster: RelOptCluster, schema: RelOptSchema): RelBuilder =
+      new FlinkRelBuilder(context, cluster, schema)
+  }
 }

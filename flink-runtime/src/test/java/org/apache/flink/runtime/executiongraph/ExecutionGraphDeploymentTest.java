@@ -207,6 +207,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 
 			assertEquals(ExecutionState.CREATED, vertex.getExecutionState());
 
+			vertex.getCurrentExecutionAttempt().registerProducedPartitions(slot.getTaskManagerLocation()).get();
 			vertex.deployToSlot(slot);
 
 			assertEquals(ExecutionState.DEPLOYING, vertex.getExecutionState());
@@ -239,7 +240,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 
 			assertEquals(10, iteratorProducedPartitions.next().getNumberOfSubpartitions());
 			assertEquals(10, iteratorProducedPartitions.next().getNumberOfSubpartitions());
-			assertEquals(10, iteratorConsumedPartitions.next().getInputChannelDeploymentDescriptors().length);
+			assertEquals(10, iteratorConsumedPartitions.next().getShuffleDescriptors().length);
 		}
 		catch (Exception e) {
 			e.printStackTrace();
@@ -336,7 +337,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 		// verify behavior for canceled executions
 		Execution execution1 = graphAndExecutions.f1.values().iterator().next();
 
-		IOMetrics ioMetrics = new IOMetrics(0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0);
+		IOMetrics ioMetrics = new IOMetrics(0, 0, 0, 0);
 		Map<String, Accumulator<?, ?>> accumulators = new HashMap<>();
 		accumulators.put("acc", new IntCounter(4));
 		AccumulatorSnapshot accumulatorSnapshot = new AccumulatorSnapshot(graph.getJobID(), execution1.getAttemptId(), accumulators);
@@ -352,7 +353,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 		// verify behavior for failed executions
 		Execution execution2 = graphAndExecutions.f1.values().iterator().next();
 
-		IOMetrics ioMetrics2 = new IOMetrics(0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0);
+		IOMetrics ioMetrics2 = new IOMetrics(0, 0, 0, 0);
 		Map<String, Accumulator<?, ?>> accumulators2 = new HashMap<>();
 		accumulators2.put("acc", new IntCounter(8));
 		AccumulatorSnapshot accumulatorSnapshot2 = new AccumulatorSnapshot(graph.getJobID(), execution2.getAttemptId(), accumulators2);
@@ -380,7 +381,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 
 		Map<ExecutionAttemptID, Execution> executions = setupExecution(v1, 1, v2, 1).f1;
 
-		IOMetrics ioMetrics = new IOMetrics(0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0);
+		IOMetrics ioMetrics = new IOMetrics(0, 0, 0, 0);
 		Map<String, Accumulator<?, ?>> accumulators = Collections.emptyMap();
 
 		Execution execution1 = executions.values().iterator().next();
@@ -801,6 +802,7 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 					0,
 					1,
 					CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
+					false,
 					false),
 				null));
 
@@ -817,7 +819,6 @@ public class ExecutionGraphDeploymentTest extends TestLogger {
 			timeout,
 			new NoRestartStrategy(),
 			new UnregisteredMetricsGroup(),
-			1,
 			blobWriter,
 			timeout,
 			LoggerFactory.getLogger(getClass()));

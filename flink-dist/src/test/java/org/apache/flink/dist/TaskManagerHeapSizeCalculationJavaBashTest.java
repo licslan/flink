@@ -20,8 +20,10 @@ package org.apache.flink.dist;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.taskexecutor.TaskManagerServices;
+import org.apache.flink.runtime.taskmanager.NettyShuffleEnvironmentConfiguration;
 import org.apache.flink.util.OperatingSystem;
 import org.apache.flink.util.TestLogger;
 
@@ -69,8 +71,8 @@ public class TaskManagerHeapSizeCalculationJavaBashTest extends TestLogger {
 	}
 
 	/**
-	 * Tests that {@link TaskManagerServices#calculateNetworkBufferMemory(long, Configuration)} has the same
-	 * result as the shell script.
+	 * Tests that {@link NettyShuffleEnvironmentConfiguration#calculateNetworkBufferMemory(long, Configuration)}
+	 * has the same result as the shell script.
 	 */
 	@Test
 	public void compareNetworkBufShellScriptWithJava() throws Exception {
@@ -157,9 +159,9 @@ public class TaskManagerHeapSizeCalculationJavaBashTest extends TestLogger {
 		config.setLong(KEY_TASKM_MEM_SIZE, javaMemMB);
 		config.setBoolean(TaskManagerOptions.MEMORY_OFF_HEAP, useOffHeap);
 
-		config.setFloat(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_FRACTION, netBufMemFrac);
-		config.setString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MIN, String.valueOf(netBufMemMin));
-		config.setString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MAX, String.valueOf(netBufMemMax));
+		config.setFloat(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_FRACTION, netBufMemFrac);
+		config.setString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MIN, String.valueOf(netBufMemMin));
+		config.setString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MAX, String.valueOf(netBufMemMax));
 
 		if (managedMemSizeMB == 0) {
 			config.setString(TaskManagerOptions.MANAGED_MEMORY_SIZE, "0");
@@ -200,7 +202,7 @@ public class TaskManagerHeapSizeCalculationJavaBashTest extends TestLogger {
 			Configuration config = getConfig(javaMemMB, useOffHeap, frac, min, max, managedMemSize, managedMemFrac);
 			long totalJavaMemorySize = ((long) javaMemMB) << 20; // megabytes to bytes
 			final int networkBufMB =
-				(int) (TaskManagerServices.calculateNetworkBufferMemory(totalJavaMemorySize, config) >> 20);
+				(int) (NettyShuffleEnvironmentConfiguration.calculateNetworkBufferMemory(totalJavaMemorySize, config) >> 20);
 			// max (exclusive): total - netbuf
 			managedMemSize = Math.min(javaMemMB - networkBufMB - 1, ran.nextInt(Integer.MAX_VALUE));
 		} else {
@@ -226,13 +228,14 @@ public class TaskManagerHeapSizeCalculationJavaBashTest extends TestLogger {
 
 		final long totalJavaMemorySizeMB = config.getLong(KEY_TASKM_MEM_SIZE, 0L);
 
-		long javaNetworkBufMem = TaskManagerServices.calculateNetworkBufferMemory(totalJavaMemorySizeMB << 20, config);
+		long javaNetworkBufMem = NettyShuffleEnvironmentConfiguration.calculateNetworkBufferMemory(
+			totalJavaMemorySizeMB << 20, config);
 
 		String[] command = {"src/test/bin/calcTMNetBufMem.sh",
 			totalJavaMemorySizeMB + "m",
-			String.valueOf(config.getFloat(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_FRACTION)),
-			config.getString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MIN),
-			config.getString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MAX)};
+			String.valueOf(config.getFloat(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_FRACTION)),
+			config.getString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MIN),
+			config.getString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MAX)};
 
 		String scriptOutput = executeScript(command);
 
@@ -269,9 +272,9 @@ public class TaskManagerHeapSizeCalculationJavaBashTest extends TestLogger {
 		String[] command = {"src/test/bin/calcTMHeapSizeMB.sh",
 			totalJavaMemorySizeMB + "m",
 			String.valueOf(config.getBoolean(TaskManagerOptions.MEMORY_OFF_HEAP)),
-			String.valueOf(config.getFloat(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_FRACTION)),
-			config.getString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MIN),
-			config.getString(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_MAX),
+			String.valueOf(config.getFloat(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_FRACTION)),
+			config.getString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MIN),
+			config.getString(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_MEMORY_MAX),
 			config.getString(TaskManagerOptions.MANAGED_MEMORY_SIZE),
 			String.valueOf(config.getFloat(TaskManagerOptions.MANAGED_MEMORY_FRACTION))};
 		String scriptOutput = executeScript(command);

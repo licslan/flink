@@ -17,8 +17,16 @@
  */
 package org.apache.flink.table.plan.nodes.physical.batch
 
+import org.apache.flink.runtime.operators.DamBehavior
+import org.apache.flink.streaming.api.transformations.{OneInputTransformation, StreamTransformation}
+import org.apache.flink.table.api.{BatchTableEnvironment, TableConfigOptions}
+import org.apache.flink.table.calcite.FlinkTypeFactory
+import org.apache.flink.table.codegen.{CodeGeneratorContext, ExpandCodeGenerator}
+import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.plan.nodes.calcite.Expand
+import org.apache.flink.table.plan.nodes.exec.{BatchExecNode, ExecNode}
 import org.apache.flink.table.plan.util.RelExplainUtil
+import org.apache.flink.table.typeutils.BaseRowTypeInfo
 
 import org.apache.calcite.plan.{RelOptCluster, RelTraitSet}
 import org.apache.calcite.rel.`type`.RelDataType
@@ -26,6 +34,8 @@ import org.apache.calcite.rel.{RelNode, RelWriter}
 import org.apache.calcite.rex.RexNode
 
 import java.util
+
+import scala.collection.JavaConversions._
 
 /**
   * Batch physical RelNode for [[Expand]].
@@ -38,7 +48,8 @@ class BatchExecExpand(
     projects: util.List[util.List[RexNode]],
     expandIdIndex: Int)
   extends Expand(cluster, traitSet, input, outputRowType, projects, expandIdIndex)
-  with BatchPhysicalRel {
+  with BatchPhysicalRel
+  with BatchExecNode[BaseRow] {
 
   override def copy(traitSet: RelTraitSet, inputs: util.List[RelNode]): RelNode = {
     new BatchExecExpand(
@@ -54,6 +65,46 @@ class BatchExecExpand(
   override def explainTerms(pw: RelWriter): RelWriter = {
     super.explainTerms(pw)
       .item("projects", RelExplainUtil.projectsToString(projects, input.getRowType, getRowType))
+  }
+
+  //~ ExecNode methods -----------------------------------------------------------
+
+  override def getDamBehavior: DamBehavior = DamBehavior.PIPELINED
+
+  override def getInputNodes: util.List[ExecNode[BatchTableEnvironment, _]] = {
+    getInputs.map(_.asInstanceOf[ExecNode[BatchTableEnvironment, _]])
+  }
+
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[BatchTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
+
+  override protected def translateToPlanInternal(
+      tableEnv: BatchTableEnvironment): StreamTransformation[BaseRow] = {
+    val config = tableEnv.getConfig
+    val inputTransform = getInputNodes.get(0).translateToPlan(tableEnv)
+      .asInstanceOf[StreamTransformation[BaseRow]]
+    val inputType = inputTransform.getOutputType.asInstanceOf[BaseRowTypeInfo].toRowType
+    val outputType = FlinkTypeFactory.toLogicalRowType(getRowType)
+
+    val ctx = CodeGeneratorContext(config)
+    val operator = ExpandCodeGenerator.generateExpandOperator(
+      ctx,
+      inputType,
+      outputType,
+      config,
+      projects,
+      opName = "BatchExpand")
+
+    val operatorName = s"BatchExecExpand: ${getRowType.getFieldList.map(_.getName).mkString(", ")}"
+    new OneInputTransformation(
+      inputTransform,
+      operatorName,
+      operator,
+      BaseRowTypeInfo.of(outputType),
+      getResource.getParallelism)
   }
 
 }

@@ -33,12 +33,12 @@ This project bundles the following dependencies under the Apache Software Licens
 - com.twitter:chill-java:0.7.6
 - com.twitter:chill_2.11:0.7.6
 - com.typesafe:config:1.3.0
-- com.typesafe:ssl-config-core_2.11:0.2.1
-- com.typesafe.akka:akka-actor_2.11:2.4.20
-- com.typesafe.akka:akka-camel_2.11:2.4.20
-- com.typesafe.akka:akka-protobuf_2.11:2.4.20
-- com.typesafe.akka:akka-slf4j_2.11:2.4.20
-- com.typesafe.akka:akka-stream_2.11:2.4.20
+- com.typesafe:ssl-config-core_2.11:0.3.7
+- com.typesafe.akka:akka-actor_2.11:2.5.1
+- com.typesafe.akka:akka-camel_2.11:2.5.21
+- com.typesafe.akka:akka-protobuf_2.11:2.5.21
+- com.typesafe.akka:akka-slf4j_2.11:2.5.21
+- com.typesafe.akka:akka-stream_2.11:2.5.21
 - commons-cli:commons-cli:1.3.1
 - commons-collections:commons-collections:3.2.2
 - commons-io:commons-io:2.4
@@ -64,7 +64,7 @@ The following dependencies all share the same BSD license which you find under l
 - org.scala-lang:scala-library:2.11.12
 - org.scala-lang:scala-reflect:2.11.12
 - org.scala-lang.modules:scala-java8-compat_2.11:0.7.0
-- org.scala-lang.modules:scala-parser-combinators_2.11:1.0.4
+- org.scala-lang.modules:scala-parser-combinators_2.11:1.1.1
 - org.scala-lang.modules:scala-xml_2.11:1.0.5
 
 This project bundles the following dependencies under the MIT/X11 license.
@@ -80,7 +80,7 @@ but some files are heavily based on public domain code written by Igor Pavlov.
 
 This project bundles the following dependencies under the Creative Commons CC0 "No Rights Reserved".
 
-- org.reactivestreams:reactive-streams:1.0.0
+- org.reactivestreams:reactive-streams:1.0.2
 
 This product includes software from the Spring Framework,
 under the Apache License 2.0 (see: StringUtils.containsWhitespace())
@@ -106,7 +106,7 @@ Copyright 2014-2019 The Apache Software Foundation
 
 This project bundles the following dependencies under the Apache Software License 2.0. (http://www.apache.org/licenses/LICENSE-2.0.txt)
 
-- com.typesafe.akka:akka-remote_2.11:2.4.20
+- com.typesafe.akka:akka-remote_2.11:2.5.21
 - io.netty:netty:3.10.6.Final
 - org.apache.zookeeper:zookeeper:3.4.10
 - org.uncommons.maths:uncommons-maths:1.2.2a
@@ -304,6 +304,28 @@ This project bundles the following dependencies under SIL OFL 1.1 license. (http
 See bundled license files for details.
 
 - font-awesome:4.5.0 (Font)
+
+flink-azure-fs-hadoop
+Copyright 2014-2019 The Apache Software Foundation
+
+This project includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+This project bundles the following dependencies under the Apache Software License 2.0 (http://www.apache.org/licenses/LICENSE-2.0.txt)
+
+- com.fasterxml.jackson.core:jackson-annotations:2.7.0
+- com.fasterxml.jackson.core:jackson-core:2.7.8
+- com.fasterxml.jackson.core:jackson-databind:2.7.8
+- com.google.guava:guava:11.0.2
+- com.microsoft.azure:azure-keyvault-core:0.8.0
+- com.microsoft.azure:azure-storage:5.4.0
+- commons-codec:commons-codec:1.10
+- commons-logging:commons-logging:1.1.3
+- org.apache.hadoop:hadoop-azure:3.1.0
+- org.apache.httpcomponents:httpclient:4.5.3
+- org.apache.httpcomponents:httpcore:4.4.6
+- org.eclipse.jetty:jetty-util:9.3.19.v20170502
+- org.eclipse.jetty:jetty-util-ajax:9.3.19.v20170502
 
 flink-swift-fs-hadoop
 Copyright 2014-2019 The Apache Software Foundation
@@ -5844,3 +5866,42 @@ This project bundles the following dependencies under the Apache Software Licens
 
 Apache HttpClient
 Copyright 1999-2017 The Apache Software Foundation
+
+// ------------------------------------------------------------------
+// NOTICE file corresponding to the section 4d of The Apache License,
+// Version 2.0, in this case for Apache Flink
+// ------------------------------------------------------------------
+
+Apache Flink
+Copyright 2006-2019 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+flink-python
+Copyright 2014-2019 The Apache Software Foundation
+
+This project bundles the following dependencies under the BSD license.
+See bundled license files for details
+
+- net.sf.py4j:py4j:0.10.8.1
+
+This project bundles the following dependencies under the MIT license. (https://opensource.org/licenses/MIT)
+See bundled license files for details.
+
+- net.razorvine:pyrolite:4.13
+
+// ------------------------------------------------------------------
+// NOTICE file corresponding to the section 4d of The Apache License,
+// Version 2.0, in this case for Apache Flink
+// ------------------------------------------------------------------
+
+Apache Flink
+Copyright 2006-2019 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+
+flink-python
+Copyright 2014-2019 The Apache Software Foundation

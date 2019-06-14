@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.plan.stats
 
+import org.apache.flink.table.plan.`trait`.RelModifiedMonotonicity
+
 import org.apache.calcite.rel.{RelCollation, RelDistribution, RelReferentialConstraint}
 import org.apache.calcite.schema.Statistic
 import org.apache.calcite.util.ImmutableBitSet
@@ -32,7 +34,8 @@ import scala.collection.JavaConversions._
   */
 class FlinkStatistic(
     tableStats: TableStats,
-    uniqueKeys: util.Set[_ <: util.Set[String]] = null)
+    uniqueKeys: util.Set[_ <: util.Set[String]] = null,
+    relModifiedMonotonicity: RelModifiedMonotonicity = null)
   extends Statistic {
 
   require(uniqueKeys == null || !uniqueKeys.exists(keys => keys == null || keys.isEmpty),
@@ -64,6 +67,11 @@ class FlinkStatistic(
     * @return
     */
   def getUniqueKeys: util.Set[_ <: util.Set[String]] = uniqueKeys
+
+  /**
+    * Returns the modified monotonicity of the table
+    */
+  def getRelModifiedMonotonicity: RelModifiedMonotonicity = relModifiedMonotonicity
 
   /**
     * Returns the number of rows of the table.
@@ -113,6 +121,7 @@ object FlinkStatistic {
 
     private var tableStats: TableStats = _
     private var uniqueKeys: util.Set[_ <: util.Set[String]] = _
+    private var relModifiedMonotonicity: RelModifiedMonotonicity = _
 
     def tableStats(tableStats: TableStats): Builder = {
       this.tableStats = tableStats
@@ -124,18 +133,24 @@ object FlinkStatistic {
       this
     }
 
+    def relModifiedMonotonicity(monotonicity: RelModifiedMonotonicity): Builder = {
+      this.relModifiedMonotonicity = monotonicity
+      this
+    }
+
     def statistic(statistic: FlinkStatistic): Builder = {
       require(statistic != null, "input statistic cannot be null!")
       this.tableStats = statistic.getTableStats
       this.uniqueKeys = statistic.getUniqueKeys
+      this.relModifiedMonotonicity = statistic.getRelModifiedMonotonicity
       this
     }
 
     def build(): FlinkStatistic = {
-      if (tableStats == null && uniqueKeys == null) {
+      if (tableStats == null && uniqueKeys == null && relModifiedMonotonicity == null) {
         UNKNOWN
       } else {
-        new FlinkStatistic(tableStats, uniqueKeys)
+        new FlinkStatistic(tableStats, uniqueKeys, relModifiedMonotonicity)
       }
     }
   }

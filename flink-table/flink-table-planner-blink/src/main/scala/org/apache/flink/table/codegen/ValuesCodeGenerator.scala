@@ -26,7 +26,6 @@ import org.apache.flink.table.typeutils.BaseRowTypeInfo
 
 import org.apache.calcite.rel.`type`.RelDataType
 import org.apache.calcite.rex.RexLiteral
-
 import com.google.common.collect.ImmutableList
 
 import scala.collection.JavaConversions._
@@ -39,7 +38,7 @@ object ValuesCodeGenerator {
     tuples: ImmutableList[ImmutableList[RexLiteral]],
     description: String): ValuesInputFormat = {
     val config = tableEnv.getConfig
-    val outputType = FlinkTypeFactory.toInternalRowType(rowType)
+    val outputType = FlinkTypeFactory.toLogicalRowType(rowType)
 
     val ctx = CodeGeneratorContext(config)
     val exprGenerator = new ExprCodeGenerator(ctx, false)
@@ -56,8 +55,7 @@ object ValuesCodeGenerator {
       generatedRecords.map(_.code),
       outputType)
 
-    val baseRowTypeInfo = new BaseRowTypeInfo(outputType.getFieldTypes, outputType.getFieldNames)
-    new ValuesInputFormat(generatedFunction, baseRowTypeInfo)
+    new ValuesInputFormat(generatedFunction, BaseRowTypeInfo.of(outputType))
   }
 
 }

@@ -436,6 +436,9 @@ public class AsyncWaitOperatorTest extends TestLogger {
 	private JobVertex createChainedVertex(boolean withLazyFunction) {
 		StreamExecutionEnvironment chainEnv = StreamExecutionEnvironment.getExecutionEnvironment();
 
+		// set parallelism to 2 to avoid chaining with source in case when available processors is 1.
+		chainEnv.setParallelism(2);
+
 		// the input is only used to construct a chained operator, and they will not be used in the real tests.
 		DataStream<Integer> input = chainEnv.fromElements(1, 2, 3);
 
@@ -543,7 +546,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
 
 		final CheckpointMetaData checkpointMetaData = new CheckpointMetaData(checkpointId, checkpointTimestamp);
 
-		task.triggerCheckpoint(checkpointMetaData, CheckpointOptions.forCheckpointWithDefaultLocation());
+		task.triggerCheckpoint(checkpointMetaData, CheckpointOptions.forCheckpointWithDefaultLocation(), false);
 
 		taskStateManagerMock.getWaitForReportLatch().await();
 
@@ -584,7 +587,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
 		restoredTaskHarness.processElement(new StreamRecord<>(7, initialTime + 7));
 
 		// trigger the checkpoint while processing stream elements
-		restoredTask.triggerCheckpoint(new CheckpointMetaData(checkpointId, checkpointTimestamp), CheckpointOptions.forCheckpointWithDefaultLocation());
+		restoredTask.triggerCheckpoint(new CheckpointMetaData(checkpointId, checkpointTimestamp), CheckpointOptions.forCheckpointWithDefaultLocation(), false);
 
 		restoredTaskHarness.processElement(new StreamRecord<>(8, initialTime + 8));
 

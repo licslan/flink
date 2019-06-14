@@ -21,7 +21,6 @@ package org.apache.flink.table.codegen
 import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.functions.{Function, RuntimeContext}
 import org.apache.flink.api.common.typeutils.TypeSerializer
-import org.apache.flink.table.`type`.{InternalType, InternalTypes, RowType, TypeConverters}
 import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.codegen.CodeGenUtils._
 import org.apache.flink.table.codegen.GenerateUtils.generateRecordStatement
@@ -29,6 +28,9 @@ import org.apache.flink.table.dataformat.GenericRow
 import org.apache.flink.table.functions.{FunctionContext, UserDefinedFunction}
 import org.apache.flink.table.runtime.TableStreamOperator
 import org.apache.flink.table.runtime.util.collections._
+import org.apache.flink.table.types.InternalSerializers
+import org.apache.flink.table.types.logical.LogicalTypeRoot._
+import org.apache.flink.table.types.logical._
 import org.apache.flink.util.InstantiationUtil
 
 import org.apache.calcite.avatica.util.DateTimeUtils
@@ -99,9 +101,9 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
   private val reusableStringConstants: mutable.Map[String, String] = mutable.Map[String,  String]()
 
   // map of type serializer that will be added only once
-  // InternalType -> reused_term
-  private val reusableTypeSerializers: mutable.Map[InternalType, String] =
-    mutable.Map[InternalType,  String]()
+  // LogicalType -> reused_term
+  private val reusableTypeSerializers: mutable.Map[LogicalType, String] =
+    mutable.Map[LogicalType,  String]()
 
   /**
     * The current method name for [[reusableLocalVariableStatements]]. You can start a new
@@ -363,7 +365,7 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     * Adds a reusable output record statement to member area.
     */
   def addReusableOutputRecord(
-      t: InternalType,
+      t: LogicalType,
       clazz: Class[_],
       outRecordTerm: String,
       outRecordWriterTerm: Option[String] = None): Unit = {
@@ -376,7 +378,7 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     */
   def addReusableNullRow(rowTerm: String, arity: Int): Unit = {
     addReusableOutputRecord(
-      new RowType((0 until arity).map(_ => InternalTypes.INT): _*),
+      RowType.of((0 until arity).map(_ => new IntType()): _*),
       classOf[GenericRow],
       rowTerm)
   }
@@ -384,21 +386,21 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
   /**
     * Adds a reusable internal hash set to the member area of the generated class.
     */
-  def addReusableHashSet(elements: Seq[GeneratedExpression], elementType: InternalType): String = {
+  def addReusableHashSet(elements: Seq[GeneratedExpression], elementType: LogicalType): String = {
     val fieldTerm = newName("set")
 
-    val setTypeTerm = elementType match {
-      case InternalTypes.BYTE => className[ByteHashSet]
-      case InternalTypes.SHORT => className[ShortHashSet]
-      case InternalTypes.INT => className[IntHashSet]
-      case InternalTypes.LONG => className[LongHashSet]
-      case InternalTypes.FLOAT => className[FloatHashSet]
-      case InternalTypes.DOUBLE => className[DoubleHashSet]
+    val setTypeTerm = elementType.getTypeRoot match {
+      case TINYINT => className[ByteHashSet]
+      case SMALLINT => className[ShortHashSet]
+      case INTEGER => className[IntHashSet]
+      case BIGINT => className[LongHashSet]
+      case FLOAT => className[FloatHashSet]
+      case DOUBLE => className[DoubleHashSet]
       case _ => className[ObjectHashSet[_]]
     }
 
     addReusableMember(
-      s"final $setTypeTerm $fieldTerm = new $setTypeTerm(${elements.size})")
+      s"final $setTypeTerm $fieldTerm = new $setTypeTerm(${elements.size});")
 
     elements.foreach { element =>
       val content =
@@ -560,7 +562,13 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
       obj: AnyRef,
       fieldNamePrefix: String,
       fieldTypeTerm: String = null): String = {
-    val fieldTerm = newName(fieldNamePrefix)
+    addReusableObjectWithName(obj, newName(fieldNamePrefix), fieldTypeTerm)
+  }
+
+  def addReusableObjectWithName(
+      obj: AnyRef,
+      fieldTerm: String,
+      fieldTypeTerm: String = null): String = {
     val clsName = Option(fieldTypeTerm).getOrElse(obj.getClass.getCanonicalName)
     addReusableObjectInternal(obj, fieldTerm, clsName)
     fieldTerm
@@ -586,12 +594,16 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     * Adds a reusable [[UserDefinedFunction]] to the member area of the generated [[Function]].
     *
     * @param function [[UserDefinedFunction]] object to be instantiated during runtime
+    * @param functionContextClass class of [[FunctionContext]]
     * @param contextTerm [[RuntimeContext]] term to access the [[RuntimeContext]]
     * @return member variable term
     */
-  def addReusableFunction(function: UserDefinedFunction, contextTerm: String = null): String = {
+  def addReusableFunction(
+      function: UserDefinedFunction,
+      functionContextClass: Class[_ <: FunctionContext] = classOf[FunctionContext],
+      contextTerm: String = null): String = {
     val classQualifier = function.getClass.getCanonicalName
-    val fieldTerm = s"function_${function.functionIdentifier}"
+    val fieldTerm = CodeGenUtils.udfFieldName(function)
 
     addReusableObjectInternal(function, fieldTerm, classQualifier)
 
@@ -621,7 +633,7 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     * @param t the internal type which used to generate internal type serializer
     * @return member variable term
     */
-  def addReusableTypeSerializer(t: InternalType): String = {
+  def addReusableTypeSerializer(t: LogicalType): String = {
     // if type serializer has been used before, we can reuse the code that
     // has already been generated
     reusableTypeSerializers.get(t) match {
@@ -629,8 +641,7 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
 
       case None =>
         val term = newName("typeSerializer")
-        val ser = TypeConverters.createInternalTypeInfoFromInternalType(t)
-          .createSerializer(new ExecutionConfig)
+        val ser = InternalSerializers.create(t, new ExecutionConfig)
         addReusableObjectInternal(ser, term, ser.getClass.getCanonicalName)
         reusableTypeSerializers(t) = term
         term

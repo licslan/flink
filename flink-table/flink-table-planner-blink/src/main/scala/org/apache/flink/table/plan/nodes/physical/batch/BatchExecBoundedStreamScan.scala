@@ -71,33 +71,48 @@ class BatchExecBoundedStreamScan(
       .item("fields", getRowType.getFieldNames.asScala.mkString(", "))
   }
 
+  //~ ExecNode methods -----------------------------------------------------------
+
   override def getDamBehavior = DamBehavior.PIPELINED
+
+  override def getInputNodes: util.List[ExecNode[BatchTableEnvironment, _]] = List()
+
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[BatchTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
 
   override def translateToPlanInternal(
       tableEnv: BatchTableEnvironment): StreamTransformation[BaseRow] = {
     val config = tableEnv.getConfig
     val batchTransform = boundedStreamTable.dataStream.getTransformation
+    batchTransform.setParallelism(getResource.getParallelism)
     if (needInternalConversion) {
-      ScanUtil.convertToInternalRow(
+      val conversionTransform = ScanUtil.convertToInternalRow(
         CodeGeneratorContext(config),
         batchTransform,
         boundedStreamTable.fieldIndexes,
-        boundedStreamTable.typeInfo,
+        boundedStreamTable.dataType,
         getRowType,
         getTable.getQualifiedName,
         config,
         None)
+      conversionTransform.setParallelism(getResource.getParallelism)
+      conversionTransform
     } else {
       batchTransform.asInstanceOf[StreamTransformation[BaseRow]]
     }
   }
 
+  def getSourceTransformation: StreamTransformation[_] =
+    boundedStreamTable.dataStream.getTransformation
+
   def needInternalConversion: Boolean = {
     ScanUtil.hasTimeAttributeField(boundedStreamTable.fieldIndexes) ||
         ScanUtil.needsConversion(
-          boundedStreamTable.typeInfo,
+          boundedStreamTable.dataType,
           boundedStreamTable.dataStream.getType.getTypeClass)
   }
 
-  override def getInputNodes: util.List[ExecNode[BatchTableEnvironment, _]] = List()
 }

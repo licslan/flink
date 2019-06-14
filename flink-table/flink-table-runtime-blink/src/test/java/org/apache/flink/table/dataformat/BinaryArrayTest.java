@@ -18,12 +18,12 @@
 
 package org.apache.flink.table.dataformat;
 
-import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
-import org.apache.flink.table.type.InternalTypes;
-import org.apache.flink.table.typeutils.BaseRowSerializer;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.util.SegmentsUtil;
 
 import org.junit.Assert;
@@ -278,30 +278,6 @@ public class BinaryArrayTest {
 		}
 
 		{
-			// test char
-			BinaryArray array = new BinaryArray();
-			BinaryArrayWriter writer = new BinaryArrayWriter(array, 2, 2);
-			writer.setNullShort(0);
-			writer.writeChar(1, (char) 25);
-			writer.complete();
-
-			assertTrue(array.isNullAt(0));
-			assertEquals(25, array.getChar(1));
-			array.setChar(0, (char) 5);
-			assertEquals(5, array.getChar(0));
-			array.setNullChar(0);
-			assertTrue(array.isNullAt(0));
-
-			BinaryArray newArray = splitArray(array);
-			assertTrue(newArray.isNullAt(0));
-			assertEquals(25, newArray.getChar(1));
-			newArray.setChar(0, (char) 5);
-			assertEquals(5, newArray.getChar(0));
-			newArray.setNullChar(0);
-			assertTrue(newArray.isNullAt(0));
-		}
-
-		{
 			// test string
 			BinaryArray array = new BinaryArray();
 			BinaryArrayWriter writer = new BinaryArrayWriter(array, 2, 8);
@@ -492,9 +468,7 @@ public class BinaryArrayTest {
 	public void testNested() {
 		BinaryArray array = new BinaryArray();
 		BinaryArrayWriter writer = new BinaryArrayWriter(array, 2, 8);
-		BaseRowSerializer nestedSer = new BaseRowSerializer(
-				new ExecutionConfig(), InternalTypes.STRING, InternalTypes.INT);
-		writer.writeRow(0, GenericRow.of(fromString("1"), 1), nestedSer);
+		writer.writeRow(0, GenericRow.of(fromString("1"), 1), RowType.of(new VarCharType(VarCharType.MAX_LENGTH), new IntType()));
 		writer.setNullAt(1);
 		writer.complete();
 

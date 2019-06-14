@@ -19,43 +19,43 @@
 package org.apache.flink.table.api
 
 import org.apache.flink.annotation.VisibleForTesting
+import org.apache.flink.api.common.JobExecutionResult
 import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.api.common.typeutils.CompositeType
-import org.apache.flink.api.java.typeutils.{RowTypeInfo, _}
-import org.apache.flink.api.scala.typeutils.CaseClassTypeInfo
+import org.apache.flink.api.java.typeutils._
 import org.apache.flink.streaming.api.environment.{StreamExecutionEnvironment => JavaStreamExecEnv}
+import org.apache.flink.streaming.api.graph.StreamGraph
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment => ScalaStreamExecEnv}
+import org.apache.flink.streaming.api.transformations.StreamTransformation
 import org.apache.flink.table.api.java.{BatchTableEnvironment => JavaBatchTableEnvironment, StreamTableEnvironment => JavaStreamTableEnv}
 import org.apache.flink.table.api.scala.{BatchTableEnvironment => ScalaBatchTableEnvironment, StreamTableEnvironment => ScalaStreamTableEnv}
-import org.apache.flink.table.calcite.{FlinkContextImpl, FlinkPlannerImpl, FlinkRelBuilder, FlinkTypeFactory, FlinkTypeSystem}
+import org.apache.flink.table.calcite._
 import org.apache.flink.table.dataformat.BaseRow
-import org.apache.flink.table.functions.sql.FlinkSqlOperatorTable
-import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils
-import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils.{checkForInstantiation, checkNotSingleton, getAccumulatorTypeOfAggregateFunction, getResultTypeOfAggregateFunction}
+import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils.{checkForInstantiation, checkNotSingleton, extractResultTypeFromTableFunction, getAccumulatorTypeOfAggregateFunction, getResultTypeOfAggregateFunction}
 import org.apache.flink.table.functions.{AggregateFunction, ScalarFunction, TableFunction}
-import org.apache.flink.table.plan.cost.FlinkCostFactory
+import org.apache.flink.table.plan.nodes.calcite.{LogicalSink, Sink}
 import org.apache.flink.table.plan.nodes.exec.ExecNode
 import org.apache.flink.table.plan.nodes.physical.FlinkPhysicalRel
 import org.apache.flink.table.plan.optimize.Optimizer
+import org.apache.flink.table.plan.reuse.SubplanReuser
 import org.apache.flink.table.plan.schema.RelTable
 import org.apache.flink.table.plan.stats.FlinkStatistic
+import org.apache.flink.table.plan.util.SameRelObjectShuttle
+import org.apache.flink.table.planner.PlannerContext
 import org.apache.flink.table.sinks.TableSink
-import org.apache.flink.table.sinks.CollectTableSink
 import org.apache.flink.table.sources.TableSource
-import org.apache.flink.table.typeutils.BaseRowTypeInfo
+import org.apache.flink.table.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType
+import org.apache.flink.table.types.logical.{LogicalType, RowType, TypeInformationAnyType}
+import org.apache.flink.table.types.utils.TypeConversions.fromLegacyInfoToDataType
+import org.apache.flink.table.types.{ClassLogicalTypeConverter, DataType}
 import org.apache.flink.table.validate.FunctionCatalog
 import org.apache.flink.types.Row
 
-import org.apache.calcite.config.Lex
 import org.apache.calcite.jdbc.CalciteSchema
-import org.apache.calcite.plan.RelOptPlanner
+import org.apache.calcite.plan.{RelTrait, RelTraitDef}
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.schema.SchemaPlus
 import org.apache.calcite.schema.impl.AbstractTable
 import org.apache.calcite.sql._
-import org.apache.calcite.sql.parser.SqlParser
-import org.apache.calcite.sql.util.{ChainedSqlOperatorTable, ListSqlOperatorTable}
-import org.apache.calcite.sql2rel.SqlToRelConverter
 import org.apache.calcite.tools._
 
 import _root_.java.lang.reflect.Modifier
@@ -65,44 +65,44 @@ import _root_.java.util.{Arrays => JArrays}
 import _root_.scala.annotation.varargs
 import _root_.scala.collection.JavaConversions._
 import _root_.scala.collection.JavaConverters._
+import _root_.scala.collection.mutable
 
 /**
   * The abstract base class for batch and stream TableEnvironments.
   *
+  * @param streamEnv The [[JavaStreamExecEnv]] which is wrapped in this
+  *                [[StreamTableEnvironment]].
   * @param config The configuration of the TableEnvironment
   */
-abstract class TableEnvironment(val config: TableConfig) {
+abstract class TableEnvironment(
+    val streamEnv: JavaStreamExecEnv,
+    val config: TableConfig) {
 
-  // the catalog to hold all registered and translated tables
-  // we disable caching here to prevent side effects
-  private val internalSchema: CalciteSchema = CalciteSchema.createRootSchema(false, false)
-  private val rootSchema: SchemaPlus = internalSchema.plus()
+  protected val DEFAULT_JOB_NAME = "Flink Exec Table Job"
+
   private val functionCatalog = new FunctionCatalog
 
-  // the configuration to create a Calcite planner
-  protected lazy val frameworkConfig: FrameworkConfig = Frameworks
-    .newConfigBuilder
-    .defaultSchema(rootSchema)
-    .parserConfig(getSqlParserConfig)
-    .costFactory(new FlinkCostFactory)
-    .typeSystem(new FlinkTypeSystem)
-    .sqlToRelConverterConfig(getSqlToRelConverterConfig)
-    .operatorTable(ChainedSqlOperatorTable.of(
-      new ListSqlOperatorTable(functionCatalog.sqlFunctions),
-      FlinkSqlOperatorTable.instance()))
-    // TODO: introduce ExpressionReducer after codegen
-    // set the executor to evaluate constant expressions
-    // .executor(new ExpressionReducer(config))
-    .context(new FlinkContextImpl(config))
-    .build
+  private val plannerContext: PlannerContext =
+    new PlannerContext(
+      config,
+      functionCatalog,
+      // the catalog to hold all registered and translated tables
+      // we disable caching here to prevent side effects
+      CalciteSchema.createRootSchema(false, false),
+      getTraitDefs.toList
+    )
 
-  // the builder for Calcite RelNodes, Calcite's representation of a relational expression tree.
-  protected lazy val relBuilder: FlinkRelBuilder = createRelBuilder
+  private lazy val rootSchema: SchemaPlus = plannerContext.getRootSchema
 
-  // the planner instance used to optimize queries of this TableEnvironment
-  private lazy val planner: RelOptPlanner = relBuilder.getPlanner
+  /** Returns the [[FlinkRelBuilder]] of this TableEnvironment. */
+  private[flink] def getRelBuilder: FlinkRelBuilder = plannerContext.createRelBuilder()
 
-  private lazy val typeFactory: FlinkTypeFactory = relBuilder.getTypeFactory
+  /** Returns the Calcite [[FrameworkConfig]] of this TableEnvironment. */
+  @VisibleForTesting
+  private[flink] def getFlinkPlanner: FlinkPlannerImpl = plannerContext.createFlinkPlanner()
+
+  /** Returns the [[FlinkTypeFactory]] of this TableEnvironment. */
+  private[flink] def getTypeFactory: FlinkTypeFactory = plannerContext.getTypeFactory
 
   // a counter for unique attribute names
   private[flink] val attrNameCntr: AtomicInteger = new AtomicInteger(0)
@@ -112,64 +112,120 @@ abstract class TableEnvironment(val config: TableConfig) {
 
   private[flink] val tableNamePrefix = "_TempTable_"
 
+  // sink nodes collection
+  // TODO use SinkNode(LogicalNode) instead of Sink(RelNode) after we introduce [Expression]
+  private[flink] var sinkNodes = new mutable.ArrayBuffer[Sink]
+
+  private[flink] val transformations = new mutable.ArrayBuffer[StreamTransformation[_]]
+
   /** Returns the table config to define the runtime behavior of the Table API. */
   def getConfig: TableConfig = config
-
-  /** Returns the [[FlinkRelBuilder]] of this TableEnvironment. */
-  private[flink] def getRelBuilder: FlinkRelBuilder = relBuilder
-
-  /** Returns the Calcite [[org.apache.calcite.plan.RelOptPlanner]] of this TableEnvironment. */
-  private[flink] def getPlanner: RelOptPlanner = planner
-
-  /** Returns the [[FlinkTypeFactory]] of this TableEnvironment. */
-  private[flink] def getTypeFactory: FlinkTypeFactory = typeFactory
-
-  /** Returns the Calcite [[FrameworkConfig]] of this TableEnvironment. */
-  private[flink] def getFrameworkConfig: FrameworkConfig = frameworkConfig
-
-  /**
-    * Returns the SqlToRelConverter config.
-    *
-    * `expand` is set as false, and each sub-query becomes a [[org.apache.calcite.rex.RexSubQuery]].
-    */
-  protected def getSqlToRelConverterConfig: SqlToRelConverter.Config = {
-    SqlToRelConverter.configBuilder()
-    .withTrimUnusedFields(false)
-    .withConvertTableAccess(false)
-    .withInSubQueryThreshold(Integer.MAX_VALUE)
-    .withExpand(false)
-    .build()
-  }
-
-  /**
-    * Returns the SQL parser config for this environment including a custom Calcite configuration.
-    */
-  protected def getSqlParserConfig: SqlParser.Config = {
-    val calciteConfig = config.getCalciteConfig
-    calciteConfig.getSqlParserConfig match {
-
-      case None =>
-        // we use Java lex because back ticks are easier than double quotes in programming
-        // and cases are preserved
-        SqlParser
-          .configBuilder()
-          .setLex(Lex.JAVA)
-          .setIdentifierMaxLength(256)
-          .build()
-
-      case Some(sqlParserConfig) =>
-        sqlParserConfig
-    }
-  }
 
   /** Returns the [[QueryConfig]] depends on the concrete type of this TableEnvironment. */
   private[flink] def queryConfig: QueryConfig
 
-  /** Returns specific [[FlinkRelBuilder]] depends on the concrete type of this TableEnvironment. */
-  protected def createRelBuilder: FlinkRelBuilder
+  /** Returns specific RelTraitDefs depends on the concrete type of this TableEnvironment. */
+  protected def getTraitDefs: Array[RelTraitDef[_ <: RelTrait]]
 
   /** Returns specific query [[Optimizer]] depends on the concrete type of this TableEnvironment. */
   protected def getOptimizer: Optimizer
+
+  /**
+    * Triggers the program execution.
+    */
+  def execute(): JobExecutionResult = execute(DEFAULT_JOB_NAME)
+
+  /**
+    * Triggers the program execution with jobName.
+    */
+  def execute(jobName: String): JobExecutionResult
+
+  /**
+    * Generate a [[StreamGraph]] from this table environment, this will also clear sinkNodes.
+    * @return A [[StreamGraph]] describing the whole job.
+    */
+  def generateStreamGraph(): StreamGraph = generateStreamGraph(DEFAULT_JOB_NAME)
+
+  /**
+    * Generate a [[StreamGraph]] from this table environment, this will also clear sinkNodes.
+    * @return A [[StreamGraph]] describing the whole job.
+    */
+  def generateStreamGraph(jobName: String): StreamGraph = {
+    try {
+      compile()
+      if (transformations.isEmpty) {
+        throw new TableException("No table sinks have been created yet. " +
+          "A program needs at least one sink that consumes data. ")
+      }
+      translateStreamGraph(transformations, Some(jobName))
+    } finally {
+      sinkNodes.clear()
+      transformations.clear()
+    }
+  }
+
+  /**
+    * Translate a [[StreamGraph]] from Given streamingTransformations.
+    * @return A [[StreamGraph]] describing the given job.
+    */
+  protected def translateStreamGraph(
+      streamingTransformations: Seq[StreamTransformation[_]],
+      jobName: Option[String] = None): StreamGraph = ???
+
+  /**
+    * Compile the sinks to [[org.apache.flink.streaming.api.transformations.StreamTransformation]].
+    */
+  protected def compile(): Unit = {
+    if (sinkNodes.isEmpty) {
+      throw new TableException("Internal error in sql compile, SinkNode required here")
+    }
+
+    // translate to ExecNode
+    val nodeDag = compileToExecNodePlan(sinkNodes: _*)
+    // translate to transformation
+    val sinkTransformations = translateToPlan(nodeDag)
+    transformations.addAll(sinkTransformations)
+  }
+
+  /**
+    * Optimize [[RelNode]] tree (or DAG), and translate optimized result to ExecNode tree (or DAG).
+    */
+  @VisibleForTesting
+  private[flink] def compileToExecNodePlan(relNodes: RelNode*): Seq[ExecNode[_, _]] = {
+    if (relNodes.isEmpty) {
+      throw new TableException("Internal error in sql compile, SinkNode required here")
+    }
+
+    // optimize dag
+    val optRelNodes = optimize(relNodes)
+    // translate node dag
+    translateToExecNodeDag(optRelNodes)
+  }
+
+  /**
+    * Translate [[org.apache.flink.table.plan.nodes.physical.FlinkPhysicalRel]] DAG
+    * to [[ExecNode]] DAG.
+    */
+  @VisibleForTesting
+  private[flink] def translateToExecNodeDag(rels: Seq[RelNode]): Seq[ExecNode[_, _]] = {
+    require(rels.nonEmpty && rels.forall(_.isInstanceOf[FlinkPhysicalRel]))
+    // Rewrite same rel object to different rel objects
+    // in order to get the correct dag (dag reuse is based on object not digest)
+    val shuttle = new SameRelObjectShuttle()
+    val relsWithoutSameObj = rels.map(_.accept(shuttle))
+    // reuse subplan
+    val reusedPlan = SubplanReuser.reuseDuplicatedSubplan(relsWithoutSameObj, config)
+    // convert FlinkPhysicalRel DAG to ExecNode DAG
+    reusedPlan.map(_.asInstanceOf[ExecNode[_, _]])
+  }
+
+  /**
+    * Translates a [[ExecNode]] DAG into a [[StreamTransformation]] DAG.
+    *
+    * @param sinks The node DAG to translate.
+    * @return The [[StreamTransformation]] DAG that corresponds to the node DAG.
+    */
+  protected def translateToPlan(sinks: Seq[ExecNode[_, _]]): Seq[StreamTransformation[_]]
 
   /**
     * Writes a [[Table]] to a [[TableSink]].
@@ -181,7 +237,9 @@ abstract class TableEnvironment(val config: TableConfig) {
   private[table] def writeToSink[T](
       table: Table,
       sink: TableSink[T],
-      sinkName: String = null): Unit
+      sinkName: String = null): Unit = {
+    sinkNodes += LogicalSink.create(table.asInstanceOf[TableImpl].getRelNode, sink, sinkName)
+  }
 
   /**
     * Generates the optimized [[RelNode]] dag from the original relational nodes.
@@ -202,17 +260,6 @@ abstract class TableEnvironment(val config: TableConfig) {
     * @return The optimized [[RelNode]] tree
     */
   private[flink] def optimize(root: RelNode): RelNode = optimize(Seq(root)).head
-
-  /**
-    * Convert [[org.apache.flink.table.plan.nodes.physical.FlinkPhysicalRel]] DAG
-    * to [[ExecNode]] DAG and translate them.
-    */
-  @VisibleForTesting
-  private[flink] def translateNodeDag(rels: Seq[RelNode]): Seq[ExecNode[_, _]] = {
-    require(rels.nonEmpty && rels.forall(_.isInstanceOf[FlinkPhysicalRel]))
-    // convert FlinkPhysicalRel DAG to ExecNode DAG
-    rels.map(_.asInstanceOf[ExecNode[_, _]])
-  }
 
   /**
     * Registers a [[Table]] under a unique name in the TableEnvironment's catalog.
@@ -289,7 +336,7 @@ abstract class TableEnvironment(val config: TableConfig) {
       val tableName = tablePath(tablePath.length - 1)
       val table = schema.getTable(tableName)
       if (table != null) {
-        val scan = relBuilder.scan(JArrays.asList(tablePath: _*)).build()
+        val scan = getRelBuilder.scan(JArrays.asList(tablePath: _*)).build()
         return Some(new TableImpl(this, scan))
       }
     }
@@ -325,11 +372,7 @@ abstract class TableEnvironment(val config: TableConfig) {
     * @return completion hints that fit at the current cursor position
     */
   def getCompletionHints(statement: String, position: Int): Array[String] = {
-    val planner = new FlinkPlannerImpl(
-      getFrameworkConfig,
-      getPlanner,
-      getTypeFactory,
-      relBuilder.getCluster)
+    val planner = getFlinkPlanner
     planner.getCompletionHints(statement, position)
   }
 
@@ -382,11 +425,7 @@ abstract class TableEnvironment(val config: TableConfig) {
     * @return The result of the query as Table
     */
   def sqlQuery(query: String): Table = {
-    val planner = new FlinkPlannerImpl(
-      getFrameworkConfig,
-      getPlanner,
-      getTypeFactory,
-      relBuilder.getCluster)
+    val planner = getFlinkPlanner
     // parse the sql query
     val parsed = planner.parse(query)
     if (null != parsed && parsed.getKind.belongsTo(SqlKind.QUERY)) {
@@ -492,7 +531,7 @@ abstract class TableEnvironment(val config: TableConfig) {
     functionCatalog.registerScalarFunction(
       name,
       function,
-      typeFactory)
+      getTypeFactory)
   }
 
   /**
@@ -504,8 +543,7 @@ abstract class TableEnvironment(val config: TableConfig) {
     * @tparam T The type of the output row.
     */
   def registerFunction[T](name: String, tf: TableFunction[T]): Unit = {
-    implicit val typeInfo: TypeInformation[T] =
-      UserDefinedFunctionUtils.extractResultTypeFromTableFunction(tf)
+    implicit val typeInfo: TypeInformation[T] = extractResultTypeFromTableFunction(tf)
     registerTableFunctionInternal(name, tf)
   }
 
@@ -523,8 +561,8 @@ abstract class TableEnvironment(val config: TableConfig) {
     functionCatalog.registerTableFunction(
       name,
       function,
-      implicitly[TypeInformation[T]],
-      typeFactory)
+      fromLegacyInfoToDataType(implicitly[TypeInformation[T]]),
+      getTypeFactory)
   }
 
   /**
@@ -561,20 +599,20 @@ abstract class TableEnvironment(val config: TableConfig) {
     // check if class could be instantiated
     checkForInstantiation(function.getClass)
 
-    val resultTypeInfo: TypeInformation[_] = getResultTypeOfAggregateFunction(
+    val resultTypeInfo = getResultTypeOfAggregateFunction(
       function,
-      implicitly[TypeInformation[T]])
+      fromLegacyInfoToDataType(implicitly[TypeInformation[T]]))
 
-    val accTypeInfo: TypeInformation[_] = getAccumulatorTypeOfAggregateFunction(
+    val accTypeInfo = getAccumulatorTypeOfAggregateFunction(
       function,
-      implicitly[TypeInformation[ACC]])
+      fromLegacyInfoToDataType(implicitly[TypeInformation[ACC]]))
 
     functionCatalog.registerAggregateFunction(
       name,
       function,
       resultTypeInfo,
       accTypeInfo,
-      typeFactory)
+      getTypeFactory)
   }
 
   /** Returns a unique temporary attribute name. */
@@ -598,11 +636,7 @@ abstract class TableEnvironment(val config: TableConfig) {
     * references a field of the input type.
     */
   // TODO: we should support Expression fields after we introduce [Expression]
-  protected def isReferenceByPosition(ct: CompositeType[_], fields: Array[String]): Boolean = {
-    if (!ct.isInstanceOf[TupleTypeInfoBase[_]]) {
-      return false
-    }
-
+  protected def isReferenceByPosition(ct: RowType, fields: Array[String]): Boolean = {
     val inputNames = ct.getFieldNames
 
     // Use the by-position mode if no of the fields exists in the input.
@@ -612,41 +646,44 @@ abstract class TableEnvironment(val config: TableConfig) {
   }
 
   /**
-    * Returns field names and field positions for a given [[TypeInformation]].
+    * Returns field names and field positions for a given [[DataType]].
     *
-    * @param inputType The TypeInformation extract the field names and positions from.
-    * @tparam A The type of the TypeInformation.
+    * @param inputType The DataType extract the field names and positions from.
+    * @tparam A The type of the DataType.
     * @return A tuple of two arrays holding the field names and corresponding field positions.
     */
   protected[flink] def getFieldInfo[A](
-      inputType: TypeInformation[A]): (Array[String], Array[Int]) = {
+      inputType: DataType): (Array[String], Array[Int]) = {
 
-    if (inputType.isInstanceOf[GenericTypeInfo[A]] && inputType.getTypeClass == classOf[Row]) {
-      throw new TableException(
-        "An input of GenericTypeInfo<Row> cannot be converted to Table. " +
-          "Please specify the type of the input with a RowTypeInfo.")
-    } else {
-      (TableEnvironment.getFieldNames(inputType), TableEnvironment.getFieldIndices(inputType))
+    val logicalType = fromDataTypeToLogicalType(inputType)
+    logicalType match {
+      case value: TypeInformationAnyType[A]
+        if value.getTypeInformation.getTypeClass == classOf[Row] =>
+        throw new TableException(
+          "An input of GenericTypeInfo<Row> cannot be converted to Table. " +
+              "Please specify the type of the input with a RowTypeInfo.")
+      case _ =>
+        (TableEnvironment.getFieldNames(inputType), TableEnvironment.getFieldIndices(inputType))
     }
   }
 
   /**
-    * Returns field names and field positions for a given [[TypeInformation]] and [[Array]] of
+    * Returns field names and field positions for a given [[DataType]] and [[Array]] of
     * field names. It does not handle time attributes.
     *
-    * @param inputType The [[TypeInformation]] against which the field names are referenced.
+    * @param inputType The [[DataType]] against which the field names are referenced.
     * @param fields The fields that define the field names.
-    * @tparam A The type of the TypeInformation.
+    * @tparam A The type of the DataType.
     * @return A tuple of two arrays holding the field names and corresponding field positions.
     */
   // TODO: we should support Expression fields after we introduce [Expression]
   protected[flink] def getFieldInfo[A](
-    inputType: TypeInformation[A],
+    inputType: DataType,
     fields: Array[String]): (Array[String], Array[Int]) = {
 
     TableEnvironment.validateType(inputType)
 
-    def referenceByName(name: String, ct: CompositeType[_]): Option[Int] = {
+    def referenceByName(name: String, ct: RowType): Option[Int] = {
       val inputIdx = ct.getFieldIndex(name)
       if (inputIdx < 0) {
         throw new TableException(s"$name is not a field of type $ct. " +
@@ -656,35 +693,32 @@ abstract class TableEnvironment(val config: TableConfig) {
       }
     }
 
-    val indexedNames: Array[(Int, String)] = inputType match {
+    val indexedNames: Array[(Int, String)] = fromDataTypeToLogicalType(inputType) match {
 
-      case g: GenericTypeInfo[A]
-        if g.getTypeClass == classOf[Row] || g.getTypeClass == classOf[BaseRow] =>
+      case g: TypeInformationAnyType[A]
+        if g.getTypeInformation.getTypeClass == classOf[Row] ||
+            g.getTypeInformation.getTypeClass == classOf[BaseRow] =>
         throw new TableException(
           "An input of GenericTypeInfo<Row> cannot be converted to Table. " +
             "Please specify the type of the input with a RowTypeInfo.")
 
-      case t: TupleTypeInfoBase[A] if t.isInstanceOf[TupleTypeInfo[A]] ||
-        t.isInstanceOf[CaseClassTypeInfo[A]] || t.isInstanceOf[RowTypeInfo] ||
-          t.isInstanceOf[BaseRowTypeInfo] =>
+      case t: RowType =>
 
         // determine schema definition mode (by position or by name)
         val isRefByPos = isReferenceByPosition(t, fields)
 
-        fields.zipWithIndex flatMap { case (name, idx) =>
-          if (isRefByPos) {
-            Some((idx, name))
-          } else {
-            referenceByName(name, t).map((_, name))
-          }
+        fields.zipWithIndex flatMap {
+          case ("proctime" | "rowtime", _) =>
+            None
+          case (name, idx) =>
+            if (isRefByPos) {
+              Some((idx, name))
+            } else {
+              referenceByName(name, t).map((_, name))
+            }
         }
 
-      case p: PojoTypeInfo[A] =>
-        fields flatMap { name =>
-          referenceByName(name, p).map((_, name))
-        }
-
-      case _: TypeInformation[_] => // atomic or other custom type information
+      case _ => // atomic or other custom type information
         if (fields.length > 1) {
           // only accept the first field for an atomic type
           throw new TableException("Only accept one field to reference an atomic type.")
@@ -711,7 +745,13 @@ abstract class TableEnvironment(val config: TableConfig) {
     */
   def registerTableSource(name: String, tableSource: TableSource[_]): Unit = {
     checkValidTableName(name)
-    registerTableSourceInternal(name, tableSource, FlinkStatistic.UNKNOWN, replace = false)
+    registerTableSourceInternal(
+      name,
+      tableSource,
+      FlinkStatistic.builder()
+        .tableStats(tableSource.getTableStats.orElse(null))
+        .build(),
+      replace = false)
   }
 
   /**
@@ -724,7 +764,13 @@ abstract class TableEnvironment(val config: TableConfig) {
   def registerOrReplaceTableSource(name: String,
       tableSource: TableSource[_]): Unit = {
     checkValidTableName(name)
-    registerTableSourceInternal(name, tableSource, FlinkStatistic.UNKNOWN, replace = true)
+    registerTableSourceInternal(
+      name,
+      tableSource,
+      FlinkStatistic.builder()
+        .tableStats(tableSource.getTableStats.orElse(null))
+        .build(),
+      replace = true)
   }
 
   /**
@@ -750,18 +796,18 @@ abstract class TableEnvironment(val config: TableConfig) {
 object TableEnvironment {
 
   /**
-    * Returns field names for a given [[TypeInformation]].
+    * Returns field names for a given [[DataType]].
     *
-    * @param inputType The TypeInformation extract the field names.
-    * @tparam A The type of the TypeInformation.
+    * @param inputType The DataType extract the field names.
+    * @tparam A The type of the DataType.
     * @return An array holding the field names
     */
-  def getFieldNames[A](inputType: TypeInformation[A]): Array[String] = {
+  def getFieldNames[A](inputType: DataType): Array[String] = {
     validateType(inputType)
 
-    val fieldNames: Array[String] = inputType match {
-      case t: CompositeType[_] => t.getFieldNames
-      case _: TypeInformation[_] => Array("f0")
+    val fieldNames: Array[String] = fromDataTypeToLogicalType(inputType) match {
+      case t: RowType => t.getFieldNames.toArray(Array[String]())
+      case t => Array("f0")
     }
 
     if (fieldNames.contains("*")) {
@@ -773,42 +819,45 @@ object TableEnvironment {
 
   /**
     * Validate if class represented by the typeInfo is static and globally accessible
-    * @param typeInfo type to check
+    * @param dataType type to check
     * @throws TableException if type does not meet these criteria
     */
-  def validateType(typeInfo: TypeInformation[_]): Unit = {
-    val clazz = typeInfo.getTypeClass
+  def validateType(dataType: DataType): Unit = {
+    var clazz = dataType.getConversionClass
+    if (clazz == null) {
+      clazz = ClassLogicalTypeConverter.getDefaultExternalClassForType(dataType.getLogicalType)
+    }
     if ((clazz.isMemberClass && !Modifier.isStatic(clazz.getModifiers)) ||
       !Modifier.isPublic(clazz.getModifiers) ||
       clazz.getCanonicalName == null) {
       throw new TableException(
-        s"Class '$clazz' described in type information '$typeInfo' must be " +
+        s"Class '$clazz' described in type information '$dataType' must be " +
           s"static and globally accessible.")
     }
   }
 
   /**
-    * Returns field indexes for a given [[TypeInformation]].
+    * Returns field indexes for a given [[DataType]].
     *
-    * @param inputType The TypeInformation extract the field positions from.
+    * @param inputType The DataType extract the field positions from.
     * @return An array holding the field positions
     */
-  def getFieldIndices(inputType: TypeInformation[_]): Array[Int] = {
+  def getFieldIndices(inputType: DataType): Array[Int] = {
     getFieldNames(inputType).indices.toArray
   }
 
   /**
-    * Returns field types for a given [[TypeInformation]].
+    * Returns field types for a given [[DataType]].
     *
-    * @param inputType The TypeInformation to extract field types from.
+    * @param inputType The DataType to extract field types from.
     * @return An array holding the field types.
     */
-  def getFieldTypes(inputType: TypeInformation[_]): Array[TypeInformation[_]] = {
+  def getFieldTypes(inputType: DataType): Array[LogicalType] = {
     validateType(inputType)
 
-    inputType match {
-      case ct: CompositeType[_] => 0.until(ct.getArity).map(i => ct.getTypeAt(i)).toArray
-      case t: TypeInformation[_] => Array(t.asInstanceOf[TypeInformation[_]])
+    fromDataTypeToLogicalType(inputType) match {
+      case t: RowType => t.getChildren.toArray(Array[LogicalType]())
+      case t => Array(t)
     }
   }
 

@@ -21,6 +21,7 @@ package org.apache.flink.table.plan.nodes.exec
 import org.apache.flink.streaming.api.transformations.StreamTransformation
 import org.apache.flink.table.api.TableEnvironment
 import org.apache.flink.table.plan.nodes.physical.FlinkPhysicalRel
+import org.apache.flink.table.plan.nodes.resource.NodeResource
 
 import java.util
 
@@ -33,9 +34,19 @@ import java.util
 trait ExecNode[E <: TableEnvironment, T] {
 
   /**
+    * Defines how much resource the node will take.
+    */
+  private val resource: NodeResource = new NodeResource
+
+  /**
     * The [[StreamTransformation]] translated from this node.
     */
   private var transformation: StreamTransformation[T] = _
+
+  /**
+    * Get node resource.
+    */
+  def getResource = resource
 
   /**
     * Translates this node into a Flink operator.
@@ -67,6 +78,15 @@ trait ExecNode[E <: TableEnvironment, T] {
   def getInputNodes: util.List[ExecNode[E, _]]
 
   /**
+    * Replaces the <code>ordinalInParent</code><sup>th</sup> input.
+    * You must override this method if you override [[getInputNodes]].
+    *
+    * @param ordinalInParent Position of the child input, 0 is the first
+    * @param newInputNode New node that should be put at position ordinalInParent
+    */
+  def replaceInputNode(ordinalInParent: Int, newInputNode: ExecNode[E, _]): Unit
+
+  /**
     * Accepts a visit from a [[ExecNodeVisitor]].
     *
     * @param visitor ExecNodeVisitor
@@ -74,5 +94,4 @@ trait ExecNode[E <: TableEnvironment, T] {
   def accept(visitor: ExecNodeVisitor): Unit = {
     visitor.visit(this)
   }
-
 }

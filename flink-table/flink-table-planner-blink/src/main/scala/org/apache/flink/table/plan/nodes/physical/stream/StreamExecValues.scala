@@ -24,13 +24,12 @@ import org.apache.flink.table.codegen.ValuesCodeGenerator
 import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
 
+import com.google.common.collect.ImmutableList
 import org.apache.calcite.plan._
-import org.apache.calcite.rel.core.Values
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.`type`.RelDataType
+import org.apache.calcite.rel.core.Values
 import org.apache.calcite.rex.RexLiteral
-
-import com.google.common.collect.ImmutableList
 
 import java.util
 
@@ -64,6 +63,16 @@ class StreamExecValues(
 
   //~ ExecNode methods -----------------------------------------------------------
 
+  override def getInputNodes: util.List[ExecNode[StreamTableEnvironment, _]] = {
+    new util.ArrayList[ExecNode[StreamTableEnvironment, _]]()
+  }
+
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[StreamTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
+
   override protected def translateToPlanInternal(
       tableEnv: StreamTableEnvironment): StreamTransformation[BaseRow] = {
     if (tableEnv.getConfig.getConf.getBoolean(
@@ -79,10 +88,6 @@ class StreamExecValues(
       throw new TableException("Values source input is not supported currently. Probably " +
         "there is a where condition which always returns false in your query.")
     }
-  }
-
-  override def getInputNodes: util.List[ExecNode[StreamTableEnvironment, _]] = {
-    new util.ArrayList[ExecNode[StreamTableEnvironment, _]]()
   }
 
 }

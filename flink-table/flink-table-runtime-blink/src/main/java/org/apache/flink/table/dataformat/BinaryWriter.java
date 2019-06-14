@@ -17,14 +17,9 @@
 
 package org.apache.flink.table.dataformat;
 
-import org.apache.flink.table.type.ArrayType;
-import org.apache.flink.table.type.DecimalType;
-import org.apache.flink.table.type.GenericType;
-import org.apache.flink.table.type.InternalType;
-import org.apache.flink.table.type.InternalTypes;
-import org.apache.flink.table.type.MapType;
-import org.apache.flink.table.type.RowType;
-import org.apache.flink.table.typeutils.BaseRowSerializer;
+import org.apache.flink.table.types.logical.DecimalType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.RowType;
 
 /**
  * Writer to write a composite data format, like row, array.
@@ -58,8 +53,6 @@ public interface BinaryWriter {
 
 	void writeDouble(int pos, double value);
 
-	void writeChar(int pos, char value);
-
 	void writeString(int pos, BinaryString value);
 
 	void writeBinary(int pos, byte[] bytes);
@@ -70,7 +63,7 @@ public interface BinaryWriter {
 
 	void writeMap(int pos, BinaryMap value);
 
-	void writeRow(int pos, BaseRow value, BaseRowSerializer serializer);
+	void writeRow(int pos, BaseRow value, RowType type);
 
 	void writeGeneric(int pos, BinaryGeneric value);
 
@@ -79,47 +72,60 @@ public interface BinaryWriter {
 	 */
 	void complete();
 
-	static void write(BinaryWriter writer, int pos, Object o, InternalType type) {
-		if (type.equals(InternalTypes.BOOLEAN)) {
-			writer.writeBoolean(pos, (boolean) o);
-		} else if (type.equals(InternalTypes.BYTE)) {
-			writer.writeByte(pos, (byte) o);
-		} else if (type.equals(InternalTypes.SHORT)) {
-			writer.writeShort(pos, (short) o);
-		} else if (type.equals(InternalTypes.INT)) {
-			writer.writeInt(pos, (int) o);
-		} else if (type.equals(InternalTypes.LONG)) {
-			writer.writeLong(pos, (long) o);
-		} else if (type.equals(InternalTypes.FLOAT)) {
-			writer.writeFloat(pos, (float) o);
-		} else if (type.equals(InternalTypes.DOUBLE)) {
-			writer.writeDouble(pos, (double) o);
-		} else if (type.equals(InternalTypes.STRING)) {
-			writer.writeString(pos, (BinaryString) o);
-		} else if (type.equals(InternalTypes.CHAR)) {
-			writer.writeChar(pos, (char) o);
-		} else if (type.equals(InternalTypes.DATE)) {
-			writer.writeInt(pos, (int) o);
-		} else if (type.equals(InternalTypes.TIME)) {
-			writer.writeInt(pos, (int) o);
-		} else if (type.equals(InternalTypes.TIMESTAMP)) {
-			writer.writeLong(pos, (long) o);
-		} else if (type instanceof DecimalType) {
-			DecimalType decimalType = (DecimalType) type;
-			writer.writeDecimal(pos, (Decimal) o, decimalType.precision());
-		} else if (type instanceof ArrayType) {
-			writer.writeArray(pos, (BinaryArray) o);
-		} else if (type instanceof MapType) {
-			writer.writeMap(pos, (BinaryMap) o);
-		} else if (type instanceof RowType) {
-			RowType rowType = (RowType) type;
-			writer.writeRow(pos, (BaseRow) o, rowType.getBaseRowSerializer());
-		} else if (type instanceof GenericType) {
-			writer.writeGeneric(pos, (BinaryGeneric) o);
-		} else if (type.equals(InternalTypes.BINARY)) {
-			writer.writeBinary(pos, (byte[]) o);
-		} else {
-			throw new RuntimeException("Not support type: " + type);
+	static void write(BinaryWriter writer, int pos, Object o, LogicalType type) {
+		switch (type.getTypeRoot()) {
+			case BOOLEAN:
+				writer.writeBoolean(pos, (boolean) o);
+				break;
+			case TINYINT:
+				writer.writeByte(pos, (byte) o);
+				break;
+			case SMALLINT:
+				writer.writeShort(pos, (short) o);
+				break;
+			case INTEGER:
+			case DATE:
+			case TIME_WITHOUT_TIME_ZONE:
+			case INTERVAL_YEAR_MONTH:
+				writer.writeInt(pos, (int) o);
+				break;
+			case BIGINT:
+			case TIMESTAMP_WITHOUT_TIME_ZONE:
+			case INTERVAL_DAY_TIME:
+				writer.writeLong(pos, (long) o);
+				break;
+			case FLOAT:
+				writer.writeFloat(pos, (float) o);
+				break;
+			case DOUBLE:
+				writer.writeDouble(pos, (double) o);
+				break;
+			case VARCHAR:
+				writer.writeString(pos, (BinaryString) o);
+				break;
+			case DECIMAL:
+				DecimalType decimalType = (DecimalType) type;
+				writer.writeDecimal(pos, (Decimal) o, decimalType.getPrecision());
+				break;
+			case ARRAY:
+				writer.writeArray(pos, (BinaryArray) o);
+				break;
+			case MAP:
+			case MULTISET:
+				writer.writeMap(pos, (BinaryMap) o);
+				break;
+			case ROW:
+				RowType rowType = (RowType) type;
+				writer.writeRow(pos, (BaseRow) o, rowType);
+				break;
+			case ANY:
+				writer.writeGeneric(pos, (BinaryGeneric) o);
+				break;
+			case VARBINARY:
+				writer.writeBinary(pos, (byte[]) o);
+				break;
+			default:
+				throw new RuntimeException("Not support type: " + type);
 		}
 	}
 }

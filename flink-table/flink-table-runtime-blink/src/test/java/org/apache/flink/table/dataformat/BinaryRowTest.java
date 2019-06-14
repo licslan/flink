@@ -18,14 +18,14 @@
 
 package org.apache.flink.table.dataformat;
 
-import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.runtime.io.disk.RandomAccessInputView;
 import org.apache.flink.runtime.io.disk.RandomAccessOutputView;
-import org.apache.flink.table.type.InternalTypes;
-import org.apache.flink.table.typeutils.BaseRowSerializer;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.typeutils.BinaryRowSerializer;
 
 import org.junit.Assert;
@@ -78,7 +78,6 @@ public class BinaryRowTest {
 		row.setShort(5, (short) 55);
 		row.setByte(6, (byte) 66);
 		row.setFloat(7, 77f);
-		row.setChar(8, 'a');
 
 		assertEquals(33d, (long) row.getDouble(3), 0);
 		assertEquals(11, row.getInt(1));
@@ -88,7 +87,6 @@ public class BinaryRowTest {
 		assertEquals(true, row.getBoolean(4));
 		assertEquals((byte) 66, row.getByte(6));
 		assertEquals(77f, row.getFloat(7), 0);
-		assertEquals('a', row.getChar(8));
 	}
 
 	@Test
@@ -105,7 +103,6 @@ public class BinaryRowTest {
 
 		writer.writeBoolean(1, true);
 		writer.writeByte(2, (byte) 99);
-		writer.writeChar(4, 'x');
 		writer.writeDouble(6, 87.1d);
 		writer.writeFloat(7, 26.1f);
 		writer.writeInt(8, 88);
@@ -242,7 +239,6 @@ public class BinaryRowTest {
 		assertEquals((short) 292, row.getShort(11));
 		assertEquals(284, row.getLong(10));
 		assertEquals((byte) 99, row.getByte(2));
-		assertEquals('x', row.getChar(4));
 		assertEquals(87.1d, row.getDouble(6), 0);
 		assertEquals(26.1f, row.getFloat(7), 0);
 		assertEquals(true, row.getBoolean(1));
@@ -321,7 +317,6 @@ public class BinaryRowTest {
 			writer.writeString(9, fromString("啦啦啦啦啦我是快乐的粉刷匠"));
 			writer.writeBoolean(1, true);
 			writer.writeByte(2, (byte) 99);
-			writer.writeChar(4, 'x');
 			writer.writeDouble(6, 87.1d);
 			writer.writeFloat(7, 26.1f);
 			writer.writeInt(8, 88);
@@ -439,9 +434,7 @@ public class BinaryRowTest {
 	public void testNested() {
 		BinaryRow row = new BinaryRow(2);
 		BinaryRowWriter writer = new BinaryRowWriter(row);
-		BaseRowSerializer nestedSer = new BaseRowSerializer(
-				new ExecutionConfig(), InternalTypes.STRING, InternalTypes.INT);
-		writer.writeRow(0, GenericRow.of(fromString("1"), 1), nestedSer);
+		writer.writeRow(0, GenericRow.of(fromString("1"), 1), RowType.of(new VarCharType(VarCharType.MAX_LENGTH), new IntType()));
 		writer.setNullAt(1);
 		writer.complete();
 

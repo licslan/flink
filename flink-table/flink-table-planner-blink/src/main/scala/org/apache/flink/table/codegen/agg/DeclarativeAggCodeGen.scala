@@ -17,13 +17,14 @@
  */
 package org.apache.flink.table.codegen.agg
 
-import org.apache.flink.table.`type`.InternalType
-import org.apache.flink.table.`type`.TypeConverters.createInternalTypeFromTypeInfo
 import org.apache.flink.table.codegen.CodeGenUtils.primitiveTypeTermForType
+import org.apache.flink.table.codegen.agg.AggsHandlerCodeGenerator.DISTINCT_KEY_TERM
 import org.apache.flink.table.codegen.{CodeGeneratorContext, ExprCodeGenerator, GeneratedExpression}
 import org.apache.flink.table.expressions.{ResolvedDistinctKeyReference, _}
-import org.apache.flink.table.functions.DeclarativeAggregateFunction
+import org.apache.flink.table.functions.aggfunctions.DeclarativeAggregateFunction
 import org.apache.flink.table.plan.util.AggregateInfo
+import org.apache.flink.table.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType
+import org.apache.flink.table.types.logical.LogicalType
 
 import org.apache.calcite.tools.RelBuilder
 
@@ -51,14 +52,14 @@ class DeclarativeAggCodeGen(
     mergedAccOffset: Int,
     aggBufferOffset: Int,
     aggBufferSize: Int,
-    inputTypes: Seq[InternalType],
+    inputTypes: Seq[LogicalType],
     constantExprs: Seq[GeneratedExpression],
     relBuilder: RelBuilder)
   extends AggCodeGen {
 
   private val function = aggInfo.function.asInstanceOf[DeclarativeAggregateFunction]
 
-  private val bufferTypes = aggInfo.externalAccTypes.map(createInternalTypeFromTypeInfo)
+  private val bufferTypes = aggInfo.externalAccTypes.map(fromDataTypeToLogicalType)
   private val bufferIndexes = Array.range(aggBufferOffset, aggBufferOffset + bufferTypes.length)
   private val bufferTerms = function.aggBufferAttributes
       .map(a => s"agg${aggInfo.aggIndex}_${a.getName}")
@@ -124,7 +125,9 @@ class DeclarativeAggCodeGen(
   }
 
   def accumulate(generator: ExprCodeGenerator): String = {
-    val resolvedExprs = function.accumulateExpressions.map(_.accept(ResolveReference()))
+    val isDistinctMerge = generator.input1Term.startsWith(DISTINCT_KEY_TERM)
+    val resolvedExprs = function.accumulateExpressions
+      .map(_.accept(ResolveReference(isDistinctMerge = isDistinctMerge)))
 
     val exprs = resolvedExprs
       .map(_.accept(rexNodeGen)) // rex nodes
@@ -152,7 +155,9 @@ class DeclarativeAggCodeGen(
   }
 
   def retract(generator: ExprCodeGenerator): String = {
-    val resolvedExprs = function.retractExpressions.map(_.accept(ResolveReference()))
+    val isDistinctMerge = generator.input1Term.startsWith(DISTINCT_KEY_TERM)
+    val resolvedExprs = function.retractExpressions
+      .map(_.accept(ResolveReference(isDistinctMerge = isDistinctMerge)))
 
     val exprs = resolvedExprs
       .map(_.accept(rexNodeGen)) // rex nodes
@@ -217,10 +222,6 @@ class DeclarativeAggCodeGen(
         call.getChildren.asScala.map(_.accept(this)).asJava)
     }
 
-    override def visitSymbol(symbolExpression: SymbolExpression): Expression = {
-      symbolExpression
-    }
-
     override def visitValueLiteral(valueLiteralExpression: ValueLiteralExpression): Expression = {
       valueLiteralExpression
     }
@@ -233,7 +234,7 @@ class DeclarativeAggCodeGen(
       typeLiteral
     }
 
-    private def visitUnresolvedFieldReference(input: UnresolvedFieldReferenceExpression)
+    private def visitUnresolvedReference(input: UnresolvedReferenceExpression)
       : Expression = {
       function.aggBufferAttributes.indexOf(input) match {
         case -1 =>
@@ -287,7 +288,7 @@ class DeclarativeAggCodeGen(
 
     override def visit(other: Expression): Expression = {
       other match {
-        case u : UnresolvedFieldReferenceExpression => visitUnresolvedFieldReference(u)
+        case u : UnresolvedReferenceExpression => visitUnresolvedReference(u)
         case _ => other
       }
     }

@@ -19,11 +19,14 @@
 package org.apache.flink.table.plan.optimize.program
 
 import org.apache.flink.table.api.TableException
+import org.apache.flink.table.plan.metadata.FlinkRelMdNonCumulativeCost
+import org.apache.flink.table.plan.util.FlinkRelOptUtil
 import org.apache.flink.util.Preconditions
 
 import com.google.common.collect.ImmutableList
 import org.apache.calcite.plan.RelOptPlanner.CannotPlanException
-import org.apache.calcite.plan.{RelOptUtil, RelTrait}
+import org.apache.calcite.plan.RelTrait
+import org.apache.calcite.plan.volcano.VolcanoPlanner
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.tools.{Programs, RuleSet}
 
@@ -49,11 +52,15 @@ class FlinkVolcanoProgram[OC <: FlinkOptimizeContext] extends FlinkRuleSetProgra
     }
 
     val targetTraits = root.getTraitSet.plusAll(requiredOutputTraits.get).simplify()
-    // reuse VolcanoPlanner instance defined in context
-    val planner = Preconditions.checkNotNull(context.getVolcanoPlanner)
+    // VolcanoPlanner limits that the planer a RelNode tree belongs to and
+    // the VolcanoPlanner used to optimize the RelNode tree should be same instance.
+    // see: VolcanoPlanner#registerImpl
+    // here, use the planner in cluster directly
+    val planner = root.getCluster.getPlanner.asInstanceOf[VolcanoPlanner]
     val optProgram = Programs.ofRules(rules)
 
     try {
+      FlinkRelMdNonCumulativeCost.THREAD_PLANNER.set(planner)
       optProgram.run(
         planner,
         root,
@@ -64,23 +71,26 @@ class FlinkVolcanoProgram[OC <: FlinkOptimizeContext] extends FlinkRuleSetProgra
       case e: CannotPlanException =>
         throw new TableException(
           s"Cannot generate a valid execution plan for the given query: \n\n" +
-            s"${RelOptUtil.toString(root)}\n" +
+            s"${FlinkRelOptUtil.toString(root)}\n" +
             s"This exception indicates that the query uses an unsupported SQL feature.\n" +
-            s"Please check the documentation for the set of currently supported SQL features.")
+            s"Please check the documentation for the set of currently supported SQL features.", e)
       case t: TableException =>
         throw new TableException(
           s"Cannot generate a valid execution plan for the given query: \n\n" +
-            s"${RelOptUtil.toString(root)}\n" +
+            s"${FlinkRelOptUtil.toString(root)}\n" +
             s"${t.getMessage}\n" +
-            s"Please check the documentation for the set of currently supported SQL features.")
+            s"Please check the documentation for the set of currently supported SQL features.", t)
       case a: AssertionError =>
         throw new AssertionError(s"Sql optimization: Assertion error: ${a.getMessage}", a)
       case r: RuntimeException if r.getCause.isInstanceOf[TableException] =>
         throw new TableException(
           s"Sql optimization: Cannot generate a valid execution plan for the given query: \n\n" +
-            s"${RelOptUtil.toString(root)}\n" +
-            s"${r.getMessage}\n" +
-            s"Please check the documentation for the set of currently supported SQL features.")
+            s"${FlinkRelOptUtil.toString(root)}\n" +
+            s"${r.getCause.getMessage}\n" +
+            s"Please check the documentation for the set of currently supported SQL features.",
+          r.getCause)
+    } finally {
+      FlinkRelMdNonCumulativeCost.THREAD_PLANNER.remove()
     }
   }
 

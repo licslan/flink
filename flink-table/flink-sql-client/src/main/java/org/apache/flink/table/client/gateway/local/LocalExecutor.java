@@ -32,9 +32,11 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.plugin.PluginUtils;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.table.api.QueryConfig;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableEnvImpl;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.calcite.FlinkTypeFactory;
@@ -110,12 +112,7 @@ public class LocalExecutor implements Executor {
 			this.flinkConfig = GlobalConfiguration.loadConfiguration(flinkConfigDir);
 
 			// initialize default file system
-			try {
-				FileSystem.initialize(this.flinkConfig);
-			} catch (IOException e) {
-				throw new SqlClientException(
-					"Error while setting the default filesystem scheme from configuration.", e);
-			}
+			FileSystem.initialize(flinkConfig, PluginUtils.createPluginManagerFromRootFolder(flinkConfig));
 
 			// load command lines for deployment
 			this.commandLines = CliFrontend.loadCustomCommandLines(flinkConfig, flinkConfigDir);
@@ -248,7 +245,8 @@ public class LocalExecutor implements Executor {
 				.getTableEnvironment();
 
 		try {
-			return context.wrapClassLoader(() -> Arrays.asList(tableEnv.getCompletionHints(statement, position)));
+			return context.wrapClassLoader(() ->
+				Arrays.asList(((TableEnvImpl) tableEnv).getCompletionHints(statement, position)));
 		} catch (Throwable t) {
 			// catch everything such that the query does not crash the executor
 			if (LOG.isDebugEnabled()) {
@@ -419,9 +417,8 @@ public class LocalExecutor implements Executor {
 		try {
 			// writing to a sink requires an optimization step that might reference UDFs during code compilation
 			context.wrapClassLoader(() -> {
-				envInst
-					.getTableEnvironment()
-					.writeToSink(table, result.getTableSink(), envInst.getQueryConfig());
+				envInst.getTableEnvironment().registerTableSink(jobName, result.getTableSink());
+				table.insertInto(jobName, envInst.getQueryConfig());
 				return null;
 			});
 			jobGraph = envInst.createJobGraph(jobName);

@@ -27,7 +27,7 @@ import org.apache.flink.runtime.memory.AbstractPagedInputView;
 import org.apache.flink.runtime.memory.MemoryAllocationException;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.table.dataformat.BinaryRow;
-import org.apache.flink.table.type.InternalType;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.typeutils.BinaryRowSerializer;
 import org.apache.flink.util.MathUtils;
 import org.apache.flink.util.MutableObjectIterator;
@@ -67,8 +67,8 @@ public class BytesHashMap {
 
 	private static final Logger LOG = LoggerFactory.getLogger(BytesHashMap.class);
 
-	private static final int BUCKET_SIZE = 16;
-	private static final int RECORD_EXTRA_LENGTH = 8;
+	public static final int BUCKET_SIZE = 16;
+	public static final int RECORD_EXTRA_LENGTH = 8;
 	private static final int BUCKET_SIZE_BITS = 4;
 
 	private static final int ELEMENT_POINT_LENGTH = 8;
@@ -144,8 +144,8 @@ public class BytesHashMap {
 			final Object owner,
 			MemoryManager memoryManager,
 			long memorySize,
-			InternalType[] keyTypes,
-			InternalType[] valueTypes) {
+			LogicalType[] keyTypes,
+			LogicalType[] valueTypes) {
 		this(owner, memoryManager, memorySize, keyTypes, valueTypes, false);
 	}
 
@@ -153,8 +153,8 @@ public class BytesHashMap {
 			final Object owner,
 			MemoryManager memoryManager,
 			long memorySize,
-			InternalType[] keyTypes,
-			InternalType[] valueTypes,
+			LogicalType[] keyTypes,
+			LogicalType[] valueTypes,
 			boolean inferBucketMemory) {
 		this.segmentSize = memoryManager.getPageSize();
 		this.reservedNumBuffers = (int) (memorySize / segmentSize);
@@ -204,9 +204,9 @@ public class BytesHashMap {
 				reservedNumBuffers, reservedNumBuffers * segmentSize, initBucketSegmentNum);
 	}
 
-	static int getVariableLength(InternalType[] types) {
+	static int getVariableLength(LogicalType[] types) {
 		int length = 0;
-		for (InternalType type : types) {
+		for (LogicalType type : types) {
 			if (!BinaryRow.isInFixedLengthPart(type)) {
 				// find a better way of computing generic type field variable-length
 				// right now we use a small value assumption
@@ -216,7 +216,7 @@ public class BytesHashMap {
 		return length;
 	}
 
-	private int calcNumBucketSegments(InternalType[] keyTypes, InternalType[] valueTypes) {
+	private int calcNumBucketSegments(LogicalType[] keyTypes, LogicalType[] valueTypes) {
 		int calcRecordLength = reusedValue.getFixedLengthPartSize() + getVariableLength(valueTypes) +
 				reusedKey.getFixedLengthPartSize() + getVariableLength(keyTypes);
 		// We aim for a 200% utilization of the bucket table.

@@ -37,7 +37,6 @@ The command line can be used to
 - provide information about a job,
 - list running and waiting jobs,
 - trigger and dispose savepoints, and
-- modify a running job
 
 A prerequisite to using the command line interface is that the Flink
 master (JobManager) has been started (via
@@ -48,6 +47,12 @@ available.
 {:toc}
 
 ## Examples
+### Job Submission Examples
+-----------------------------
+
+These examples about how to submit a job in CLI.
+<div class="codetabs" markdown="1">
+<div data-lang="java" markdown="1">
 
 -   Run example program with no arguments:
 
@@ -89,6 +94,53 @@ available.
                                ./examples/batch/WordCount.jar \
                                --input hdfs:///user/hamlet.txt --output hdfs:///user/wordcount_out
 
+</div>
+
+<div data-lang="python" markdown="1">
+
+-   Run Python Table program:
+
+        ./bin/flink run -py examples/python/table/batch/word_count.py -j <path/to/flink-table.jar>
+
+-   Run Python Table program with pyFiles:
+
+        ./bin/flink run -py examples/python/table/batch/word_count.py -j <path/to/flink-table.jar> \
+                                -pyfs file:///user.txt,hdfs:///$namenode_address/username.txt
+
+-   Run Python Table program with pyFiles and pyModule:
+
+        ./bin/flink run -pym batch.word_count -pyfs examples/python/table/batch -j <path/to/flink-table.jar>
+
+-   Run Python Table program with parallelism 16:
+
+        ./bin/flink run -p 16 -py examples/python/table/batch/word_count.py -j <path/to/flink-table.jar>
+
+-   Run Python Table program with flink log output disabled:
+
+        ./bin/flink run -q -py examples/python/table/batch/word_count.py -j <path/to/flink-table.jar>
+
+-   Run Python Table program in detached mode:
+
+        ./bin/flink run -d -py examples/python/table/batch/word_count.py -j <path/to/flink-table.jar>
+
+-   Run Python Table program on a specific JobManager:
+
+        ./bin/flink run -m myJMHost:8081 \
+                               -py examples/python/table/batch/word_count.py \
+                               -j <path/to/flink-table.jar>
+
+-   Run Python Table program using a [per-job YARN cluster]({{site.baseurl}}/ops/deployment/yarn_setup.html#run-a-single-flink-job-on-hadoop-yarn) with 2 TaskManagers:
+
+        ./bin/flink run -m yarn-cluster -yn 2 \
+                               -py examples/python/table/batch/word_count.py \
+                               -j <path/to/flink-table.jar>
+</div>
+
+### Job Management Examples
+-----------------------------
+
+These examples about how to manage a job in CLI.
+
 -   Display the optimized execution plan for the WordCount example program as JSON:
 
         ./bin/flink info ./examples/batch/WordCount.jar \
@@ -122,14 +174,10 @@ available.
 
         ./bin/flink cancel -s [targetDirectory] <jobID>
 
--   Stop a job (streaming jobs only):
+-   Stop a job with a savepoint (streaming jobs only):
 
-        ./bin/flink stop <jobID>
+        ./bin/flink stop -s [targetDirectory] -d <jobID>
         
--   Modify a running job (streaming jobs only):
-
-        ./bin/flink modify <jobID> -p <newParallelism>
-
 
 **NOTE**: The difference between cancelling and stopping a (streaming) job is the following:
 
@@ -138,10 +186,13 @@ soon as possible.
 If operators are not not stopping after the cancel call, Flink will start interrupting the thread periodically
 until it stops.
 
-A "stop" call is a more graceful way of stopping a running streaming job. Stop is only available for jobs
-which use sources that implement the `StoppableFunction` interface. When the user requests to stop a job,
-all sources will receive a `stop()` method call. The job will keep running until all sources properly shut down.
-This allows the job to finish processing all inflight data.
+A "stop" call is a more graceful way of stopping a running streaming job, as the "stop" signal flows from 
+source to sink. When the user requests to stop a job, all sources will be requested to send the last checkpoint barrier
+that will trigger a savepoint, and after the successful completion of that savepoint, they will finish by calling their
+`cancel()` method. If the `-d` flag is specified, then a `MAX_WATERMARK` will be emitted before the last checkpoint 
+barrier. This will result all registered event-time timers to fire, thus flushing out any state that is waiting for 
+a specific watermark, e.g. windows. The job will keep running until all sources properly shut down. This allows the
+ job to finish processing all in-flight data. 
 
 ### Savepoints
 
@@ -228,7 +279,7 @@ Action "run" compiles and runs a program.
   Syntax: run [OPTIONS] <jar-file> <arguments>
   "run" action options:
      -c,--class <classname>               Class with the program entry point
-                                          ("main" method or "getPlan()" method.
+                                          ("main()" method or "getPlan()" method).
                                           Only needed if the JAR file does not
                                           specify the class in its manifest.
      -C,--classpath <url>                 Adds a URL to each user code
@@ -253,6 +304,19 @@ Action "run" compiles and runs a program.
                                           program. Optional flag to override the
                                           default value specified in the
                                           configuration.
+     -py,--python <python-file>           Python script with the program entry 
+                                          point.The dependent resources can be 
+                                          configured with the `--pyFiles` option.
+     -pyfs,--pyFiles <python-files>       Attach custom python files for job. 
+                                          Comma can be used as the separator to 
+                                          specify multiple files. The standard 
+                                          python resource file suffixes such as 
+                                          .py/.egg/.zip are all supported.
+                                          (eg:--pyFiles file:///tmp/myresource.zip
+                                          ,hdfs:///$namenode_address/myresource2.zip)
+     -pym,--pyModule <python-module>      Python module with the program entry 
+                                          point. This option must be used in 
+                                          conjunction with ` --pyFiles`.                                                                                                                
      -q,--sysoutLogging                   If present, suppress logging output to
                                           standard out.
      -s,--fromSavepoint <savepointPath>   Path to a savepoint to restore the job
@@ -320,8 +384,8 @@ Action "info" shows the optimized execution plan of the program (JSON).
 
   Syntax: info [OPTIONS] <jar-file> <arguments>
   "info" action options:
-     -c,--class <classname>           Class with the program entry point ("main"
-                                      method or "getPlan()" method. Only needed
+     -c,--class <classname>           Class with the program entry point ("main()"
+                                      method or "getPlan()" method). Only needed
                                       if the JAR file does not specify the class
                                       in its manifest.
      -p,--parallelism <parallelism>   The parallelism with which to run the
@@ -355,20 +419,17 @@ Action "list" lists running and scheduled programs.
 
 
 
-Action "stop" stops a running program (streaming jobs only).
+Action "stop" stops a running program with a savepoint (streaming jobs only).
 
   Syntax: stop [OPTIONS] <Job ID>
   "stop" action options:
-
-  Options for yarn-cluster mode:
-     -m,--jobmanager <arg>            Address of the JobManager (master) to
-                                      which to connect. Use this flag to connect
-                                      to a different JobManager than the one
-                                      specified in the configuration.
-     -yid,--yarnapplicationId <arg>   Attach to running YARN session
-     -z,--zookeeperNamespace <arg>    Namespace to create the Zookeeper
-                                      sub-paths for high availability mode
-
+     -d,--drain                           Send MAX_WATERMARK before taking the
+                                          savepoint and stopping the pipelne.
+     -s,--withSavepoint <withSavepoint>   Path to the savepoint (for example
+                                          hdfs:///flink/savepoint-1537). If no
+                                          directory is specified, the configured
+                                          default will be used
+                                          ("state.savepoints.dir").
   Options for default mode:
      -m,--jobmanager <arg>           Address of the JobManager (master) to which
                                      to connect. Use this flag to connect to a
@@ -413,33 +474,6 @@ Action "savepoint" triggers savepoints for a running job or disposes existing on
   "savepoint" action options:
      -d,--dispose <arg>       Path of savepoint to dispose.
      -j,--jarfile <jarfile>   Flink program JAR file.
-  Options for yarn-cluster mode:
-     -m,--jobmanager <arg>            Address of the JobManager (master) to
-                                      which to connect. Use this flag to connect
-                                      to a different JobManager than the one
-                                      specified in the configuration.
-     -yid,--yarnapplicationId <arg>   Attach to running YARN session
-     -z,--zookeeperNamespace <arg>    Namespace to create the Zookeeper
-                                      sub-paths for high availability mode
-
-  Options for default mode:
-     -m,--jobmanager <arg>           Address of the JobManager (master) to which
-                                     to connect. Use this flag to connect to a
-                                     different JobManager than the one specified
-                                     in the configuration.
-     -z,--zookeeperNamespace <arg>   Namespace to create the Zookeeper sub-paths
-                                     for high availability mode
-
-
-
-Action "modify" modifies a running job (e.g. change of parallelism).
-
-  Syntax: modify <Job ID> [OPTIONS]
-  "modify" action options:
-     -h,--help                           Show the help message for the CLI
-                                         Frontend or the action.
-     -p,--parallelism <newParallelism>   New parallelism for the specified job.
-     -v,--verbose                        This option is deprecated.
   Options for yarn-cluster mode:
      -m,--jobmanager <arg>            Address of the JobManager (master) to
                                       which to connect. Use this flag to connect

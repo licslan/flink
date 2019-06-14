@@ -18,13 +18,16 @@
 package org.apache.flink.table.codegen
 
 import org.apache.flink.streaming.api.transformations.StreamTransformation
-import org.apache.flink.table.`type`.{RowType, TypeConverters}
 import org.apache.flink.table.api.{TableConfig, TableException}
 import org.apache.flink.table.dataformat.{BaseRow, BoxedWrapperRow}
-import org.apache.flink.table.runtime.OneInputOperatorWrapper
+import org.apache.flink.table.runtime.CodeGenOperatorFactory
+import org.apache.flink.table.types.logical.RowType
 
 import org.apache.calcite.plan.RelOptCluster
 import org.apache.calcite.rex._
+import org.apache.flink.api.common.functions.{FlatMapFunction, Function}
+import org.apache.flink.table.generated.GeneratedFunction
+import org.apache.flink.table.typeutils.BaseRowTypeInfo
 
 import scala.collection.JavaConversions._
 
@@ -39,9 +42,8 @@ object CalcCodeGenerator {
       calcProgram: RexProgram,
       condition: Option[RexNode],
       retainHeader: Boolean = false,
-      opName: String): OneInputOperatorWrapper[BaseRow, BaseRow] = {
-    val inputType = TypeConverters.createInternalTypeFromTypeInfo(
-      inputTransform.getOutputType).asInstanceOf[RowType]
+      opName: String): CodeGenOperatorFactory[BaseRow] = {
+    val inputType = inputTransform.getOutputType.asInstanceOf[BaseRowTypeInfo].toRowType
     // filter out time attributes
     val inputTerm = CodeGenUtils.DEFAULT_INPUT1_TERM
     val processCode = generateProcessCode(
@@ -53,6 +55,7 @@ object CalcCodeGenerator {
       config,
       calcProgram,
       condition,
+      eagerInputUnboxingCode = true,
       retainHeader = retainHeader)
 
     val genOperator =
@@ -66,7 +69,43 @@ object CalcCodeGenerator {
         inputTerm = inputTerm,
         lazyInputUnboxingCode = true)
 
-    new OneInputOperatorWrapper(genOperator)
+    new CodeGenOperatorFactory(genOperator)
+  }
+
+  private[flink] def generateFunction[T <: Function](
+      inputType: RowType,
+      name: String,
+      returnType: RowType,
+      outRowClass: Class[_ <: BaseRow],
+      calcProjection: RexProgram,
+      calcCondition: Option[RexNode],
+      config: TableConfig): GeneratedFunction[FlatMapFunction[BaseRow, BaseRow]] = {
+    val ctx = CodeGeneratorContext(config)
+    val inputTerm = CodeGenUtils.DEFAULT_INPUT1_TERM
+    val collectorTerm = CodeGenUtils.DEFAULT_COLLECTOR_TERM
+    val processCode = generateProcessCode(
+      ctx,
+      inputType,
+      returnType,
+      outRowClass,
+      returnType.getFieldNames,
+      config,
+      calcProjection,
+      calcCondition,
+      collectorTerm = collectorTerm,
+      eagerInputUnboxingCode = false,
+      outputDirectly = true
+    )
+
+    FunctionCodeGenerator.generateFunction(
+      ctx,
+      name,
+      classOf[FlatMapFunction[BaseRow, BaseRow]],
+      processCode,
+      returnType,
+      inputType,
+      input1Term = inputTerm,
+      collectorTerm = collectorTerm)
   }
 
   private[flink] def generateProcessCode(
@@ -80,6 +119,7 @@ object CalcCodeGenerator {
       condition: Option[RexNode],
       inputTerm: String = CodeGenUtils.DEFAULT_INPUT1_TERM,
       collectorTerm: String = CodeGenUtils.DEFAULT_OPERATOR_COLLECTOR_TERM,
+      eagerInputUnboxingCode: Boolean,
       retainHeader: Boolean = false,
       outputDirectly: Boolean = false): String = {
 
@@ -87,7 +127,7 @@ object CalcCodeGenerator {
     val exprGenerator = new ExprCodeGenerator(ctx, false)
         .bindInput(inputType, inputTerm = inputTerm)
 
-    val onlyFilter = projection.lengthCompare(inputType.getArity) == 0 &&
+    val onlyFilter = projection.lengthCompare(inputType.getFieldCount) == 0 &&
       projection.zipWithIndex.forall { case (rexNode, index) =>
         rexNode.isInstanceOf[RexInputRef] && rexNode.asInstanceOf[RexInputRef].getIndex == index
       }
@@ -135,9 +175,9 @@ object CalcCodeGenerator {
       throw new TableException("This calc has no useful projection and no filter. " +
         "It should be removed by CalcRemoveRule.")
     } else if (condition.isEmpty) { // only projection
-    val projectionCode = produceProjectionCode
+      val projectionCode = produceProjectionCode
       s"""
-         |${ctx.reuseInputUnboxingCode()}
+         |${if (eagerInputUnboxingCode) ctx.reuseInputUnboxingCode() else ""}
          |$projectionCode
          |""".stripMargin
     } else {
@@ -145,14 +185,14 @@ object CalcCodeGenerator {
       // only filter
       if (onlyFilter) {
         s"""
-           |${ctx.reuseInputUnboxingCode()}
+           |${if (eagerInputUnboxingCode) ctx.reuseInputUnboxingCode() else ""}
            |${filterCondition.code}
            |if (${filterCondition.resultTerm}) {
            |  ${produceOutputCode(inputTerm)}
            |}
            |""".stripMargin
       } else { // both filter and projection
-      val filterInputCode = ctx.reuseInputUnboxingCode()
+        val filterInputCode = ctx.reuseInputUnboxingCode()
         val filterInputSet = Set(ctx.reusableInputUnboxingExprs.keySet.toSeq: _*)
 
         // if any filter conditions, projection code will enter an new scope
@@ -162,10 +202,10 @@ object CalcCodeGenerator {
           .filter(entry => !filterInputSet.contains(entry._1))
           .values.map(_.code).mkString("\n")
         s"""
-           |$filterInputCode
+           |${if (eagerInputUnboxingCode) filterInputCode else ""}
            |${filterCondition.code}
            |if (${filterCondition.resultTerm}) {
-           |  $projectionInputCode
+           |  ${if (eagerInputUnboxingCode) projectionInputCode else ""}
            |  $projectionCode
            |}
            |""".stripMargin

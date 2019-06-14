@@ -20,86 +20,83 @@ package org.apache.flink.table.plan.nodes.calcite
 
 import org.apache.flink.table.api.TableException
 import org.apache.flink.table.plan.util._
+import org.apache.flink.table.runtime.rank.{ConstantRankRange, RankRange, RankType, VariableRankRange}
 
 import org.apache.calcite.plan.{RelOptCluster, RelOptCost, RelOptPlanner, RelTraitSet}
-import org.apache.calcite.rel.`type`.RelDataType
+import org.apache.calcite.rel.`type`.{RelDataType, RelDataTypeField}
 import org.apache.calcite.rel.metadata.RelMetadataQuery
 import org.apache.calcite.rel.{RelCollation, RelNode, RelWriter, SingleRel}
-import org.apache.calcite.sql.SqlRankFunction
-import org.apache.calcite.sql.`type`.SqlTypeName
 import org.apache.calcite.util.{ImmutableBitSet, NumberUtil}
-
-import java.util
 
 import scala.collection.JavaConversions._
 
 /**
-  * Relational expression that returns the rows in which the rank function value of each row
+  * Relational expression that returns the rows in which the rank number of each row
   * is in the given range.
   *
-  * <p>NOTES: Different from [[org.apache.calcite.sql.fun.SqlStdOperatorTable.RANK]],
-  * [[Rank]] is a Relational expression， not a window function.
+  * The node is an optimization of `OVER` for some special cases,
+  * e.g.
+  * {{{
+  * SELECT * FROM (
+  *  SELECT a, b, RANK() OVER (PARTITION BY b ORDER BY c) rk FROM MyTable) t
+  * WHERE rk < 10
+  * }}}
+  * can be converted to this node.
   *
-  * <p>[[Rank]] will output rank function value as its last column.
-  *
-  * <p>This RelNode only handles single rank function, is an optimization for some cases. e.g.
-  * <ol>
-  * <li>
-  *   single rank function (on `OVER`) with filter in a SQL query statement
-  * </li>
-  * <li>
-  *   `ORDER BY` with `LIMIT` in a SQL query statement
-  *   (equivalent to `ROW_NUMBER` with filter and project)
-  * </li>
-  * </ol>
-  *
-  * @param cluster        cluster that this relational expression belongs to
-  * @param traitSet       the traits of this rel
-  * @param input          input relational expression
-  * @param rankFunction   rank function, including: CUME_DIST, DENSE_RANK, PERCENT_RANK, RANK,
-  *                       ROW_NUMBER
-  * @param partitionKey   partition keys (may be empty)
-  * @param sortCollation  order keys for rank function
-  * @param rankRange      the expected range of rank function value
+  * @param cluster          cluster that this relational expression belongs to
+  * @param traitSet         the traits of this rel
+  * @param input            input relational expression
+  * @param partitionKey     partition keys (may be empty)
+  * @param orderKey         order keys (should not be empty)
+  * @param rankType         rank type to define how exactly generate rank number
+  * @param rankRange        the expected range of rank number value
+  * @param rankNumberType   the field type of rank number
+  * @param outputRankNumber whether output rank number
   */
 abstract class Rank(
     cluster: RelOptCluster,
     traitSet: RelTraitSet,
     input: RelNode,
-    val rankFunction: SqlRankFunction,
     val partitionKey: ImmutableBitSet,
-    val sortCollation: RelCollation,
-    val rankRange: RankRange)
+    val orderKey: RelCollation,
+    val rankType: RankType,
+    val rankRange: RankRange,
+    val rankNumberType: RelDataTypeField,
+    val outputRankNumber: Boolean)
   extends SingleRel(cluster, traitSet, input) {
+
+  if (orderKey.getFieldCollations.isEmpty) {
+    throw new TableException("orderKey should not be empty.")
+  }
 
   rankRange match {
     case r: ConstantRankRange =>
-      if (r.rankEnd <= 0) {
-        throw new TableException(s"Rank end can't smaller than zero. The rank end is ${r.rankEnd}")
-      }
-      if (r.rankStart > r.rankEnd) {
+      if (r.getRankEnd <= 0) {
         throw new TableException(
-          s"Rank start '${r.rankStart}' can't greater than rank end '${r.rankEnd}'.")
+          s"Rank end can't smaller than zero. The rank end is ${r.getRankEnd}")
+      }
+      if (r.getRankStart > r.getRankEnd) {
+        throw new TableException(
+          s"Rank start '${r.getRankStart}' can't greater than rank end '${r.getRankEnd}'.")
       }
     case v: VariableRankRange =>
-      if (v.rankEndIndex < 0) {
+      if (v.getRankEndIndex < 0) {
         throw new TableException(s"Rank end index can't smaller than zero.")
       }
-      if (v.rankEndIndex >= input.getRowType.getFieldCount) {
+      if (v.getRankEndIndex >= input.getRowType.getFieldCount) {
         throw new TableException(s"Rank end index can't greater than input field count.")
       }
   }
 
   override def deriveRowType(): RelDataType = {
+    if (!outputRankNumber) {
+      return input.getRowType
+    }
+    // output row type = input row type + rank number type
     val typeFactory = cluster.getRexBuilder.getTypeFactory
     val typeBuilder = typeFactory.builder()
     input.getRowType.getFieldList.foreach(typeBuilder.add)
-    // rank function column is always the last column, and its type is BIGINT NOT NULL
-    val allFieldNames = new util.HashSet[String]()
-    allFieldNames.addAll(input.getRowType.getFieldNames)
-    val rankFieldName = FlinkRelOptUtil.buildUniqueFieldName(allFieldNames, "rk")
-    val bigIntType = typeFactory.createSqlType(SqlTypeName.BIGINT)
-    typeBuilder.add(rankFieldName, typeFactory.createTypeWithNullability(bigIntType, false))
+    typeBuilder.add(rankNumberType)
     typeBuilder.build()
   }
 
@@ -108,10 +105,10 @@ abstract class Rank(
       case (name, idx) => s"$name=$$$idx"
     }.mkString(", ")
     super.explainTerms(pw)
-      .item("rankFunction", rankFunction)
-      .item("rankRange", rankRange.toString())
+      .item("rankType", rankType)
+      .item("rankRange", rankRange)
       .item("partitionBy", partitionKey.map(i => s"$$$i").mkString(","))
-      .item("orderBy", RelExplainUtil.collationToString(sortCollation))
+      .item("orderBy", RelExplainUtil.collationToString(orderKey))
       .item("select", select)
   }
 
@@ -137,34 +134,4 @@ abstract class Rank(
     planner.getCostFactory.makeCost(rowCount, cpuCost, 0)
   }
 
-}
-
-sealed trait RankRange extends Serializable {
-  def toString(inputFieldNames: Seq[String]): String
-}
-
-/** [[ConstantRankRangeWithoutEnd]] is a RankRange which not specify RankEnd. */
-case class ConstantRankRangeWithoutEnd(rankStart: Long) extends RankRange {
-  override def toString(inputFieldNames: Seq[String]): String = this.toString
-
-  override def toString: String = s"rankStart=$rankStart"
-}
-
-/** rankStart and rankEnd are inclusive, rankStart always start from one. */
-case class ConstantRankRange(rankStart: Long, rankEnd: Long) extends RankRange {
-
-  override def toString(inputFieldNames: Seq[String]): String = this.toString
-
-  override def toString: String = s"rankStart=$rankStart, rankEnd=$rankEnd"
-}
-
-/** changing rank limit depends on input */
-case class VariableRankRange(rankEndIndex: Int) extends RankRange {
-  override def toString(inputFieldNames: Seq[String]): String = {
-    s"rankEnd=${inputFieldNames(rankEndIndex)}"
-  }
-
-  override def toString: String = {
-    s"rankEnd=$$$rankEndIndex"
-  }
 }

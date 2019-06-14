@@ -17,14 +17,23 @@
  */
 package org.apache.flink.table.plan.nodes.physical.stream
 
-import org.apache.flink.table.plan.`trait`.TraitUtil
-import org.apache.flink.table.plan.nodes.calcite.{Rank, RankRange}
-import org.apache.flink.table.plan.util.{RelExplainUtil, UpdatingPlanChecker}
+import org.apache.flink.streaming.api.operators.KeyedProcessOperator
+import org.apache.flink.streaming.api.transformations.{OneInputTransformation, StreamTransformation}
+import org.apache.flink.table.api.{StreamTableEnvironment, TableConfigOptions, TableException}
+import org.apache.flink.table.calcite.FlinkTypeFactory
+import org.apache.flink.table.codegen.EqualiserCodeGenerator
+import org.apache.flink.table.codegen.sort.ComparatorCodeGenerator
+import org.apache.flink.table.dataformat.BaseRow
+import org.apache.flink.table.plan.nodes.calcite.Rank
+import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
+import org.apache.flink.table.plan.rules.physical.stream.StreamExecRetractionRules
+import org.apache.flink.table.plan.util._
+import org.apache.flink.table.runtime.rank._
+import org.apache.flink.table.typeutils.BaseRowTypeInfo
 
 import org.apache.calcite.plan.{RelOptCluster, RelTraitSet}
 import org.apache.calcite.rel._
-import org.apache.calcite.rel.`type`.RelDataType
-import org.apache.calcite.sql.SqlRankFunction
+import org.apache.calcite.rel.`type`.RelDataTypeField
 import org.apache.calcite.util.ImmutableBitSet
 
 import java.util
@@ -33,35 +42,37 @@ import scala.collection.JavaConversions._
 
 /**
   * Stream physical RelNode for [[Rank]].
-  *
-  * @see [[StreamExecTemporalSort]] which must be time-ascending-order sort without `limit`.
-  * @see [[StreamExecSort]] which can be used for testing now, its sort key can be any type.
   */
 class StreamExecRank(
     cluster: RelOptCluster,
     traitSet: RelTraitSet,
     inputRel: RelNode,
-    rankFunction: SqlRankFunction,
     partitionKey: ImmutableBitSet,
-    sortCollation: RelCollation,
+    orderKey: RelCollation,
+    rankType: RankType,
     rankRange: RankRange,
-    val outputRankFunColumn: Boolean)
+    rankNumberType: RelDataTypeField,
+    outputRankNumber: Boolean)
   extends Rank(
     cluster,
     traitSet,
     inputRel,
-    rankFunction,
     partitionKey,
-    sortCollation,
-    rankRange)
-  with StreamPhysicalRel {
+    orderKey,
+    rankType,
+    rankRange,
+    rankNumberType,
+    outputRankNumber)
+  with StreamPhysicalRel
+  with StreamExecNode[BaseRow] {
 
   /** please uses [[getStrategy]] instead of this field */
-  private var strategy: RankStrategy = _
+  private var strategy: RankProcessStrategy = _
 
-  def getStrategy(forceRecompute: Boolean = false): RankStrategy = {
+  def getStrategy(forceRecompute: Boolean = false): RankProcessStrategy = {
     if (strategy == null || forceRecompute) {
-      strategy = analyzeRankStrategy
+      strategy = RankProcessStrategy.analyzeRankProcessStrategy(
+        inputRel, partitionKey, orderKey, cluster.getMetadataQuery)
     }
     strategy
   }
@@ -69,7 +80,7 @@ class StreamExecRank(
   override def producesUpdates = true
 
   override def needsUpdatesAsRetraction(input: RelNode): Boolean = {
-    getStrategy(forceRecompute = true) == RetractRank
+    getStrategy(forceRecompute = true) == RetractStrategy
   }
 
   override def consumesRetractions = true
@@ -78,89 +89,150 @@ class StreamExecRank(
 
   override def requireWatermark: Boolean = false
 
-  override def deriveRowType(): RelDataType = {
-    if (outputRankFunColumn) {
-      super.deriveRowType()
-    } else {
-      inputRel.getRowType
-    }
-  }
-
   override def copy(traitSet: RelTraitSet, inputs: util.List[RelNode]): RelNode = {
     new StreamExecRank(
       cluster,
       traitSet,
       inputs.get(0),
-      rankFunction,
       partitionKey,
-      sortCollation,
+      orderKey,
+      rankType,
       rankRange,
-      outputRankFunColumn)
+      rankNumberType,
+      outputRankNumber)
   }
 
   override def explainTerms(pw: RelWriter): RelWriter = {
     val inputRowType = inputRel.getRowType
     pw.input("input", getInput)
       .item("strategy", getStrategy())
-      .item("rankFunction", rankFunction.getKind)
+      .item("rankType", rankType)
       .item("rankRange", rankRange.toString(inputRowType.getFieldNames))
       .item("partitionBy", RelExplainUtil.fieldToString(partitionKey.toArray, inputRowType))
-      .item("orderBy", RelExplainUtil.collationToString(sortCollation, inputRowType))
+      .item("orderBy", RelExplainUtil.collationToString(orderKey, inputRowType))
       .item("select", getRowType.getFieldNames.mkString(", "))
   }
 
-  private def analyzeRankStrategy: RankStrategy = {
-    val rankInput = getInput
-    val mq = cluster.getMetadataQuery
-    val isUpdateStream = !UpdatingPlanChecker.isAppendOnly(rankInput)
+  //~ ExecNode methods -----------------------------------------------------------
 
-    if (isUpdateStream) {
-      val inputIsAccRetract = TraitUtil.isAccRetract(rankInput)
-      val uniqueKeys = mq.getUniqueKeys(rankInput)
-      if (inputIsAccRetract || uniqueKeys == null || uniqueKeys.isEmpty
-        // unique key should contains partition key
-        || !uniqueKeys.exists(k => k.contains(partitionKey))) {
-        // input is AccRetract or extract the unique keys failed,
-        // and we fall back to using retract rank
-        RetractRank
-      } else {
-        // TODO get `isMonotonic` value by RelModifiedMonotonicity handler
-        val isMonotonic = false
-
-        if (isMonotonic) {
-          //FIXME choose a set of primary key
-          UpdateFastRank(uniqueKeys.iterator().next().toArray)
-        } else {
-          val fieldCollations = sortCollation.getFieldCollations
-          if (fieldCollations.length == 1) {
-            // single sort key in update stream scenario (no monotonic)
-            // we can utilize unary rank function to speed up processing
-            UnaryUpdateRank(uniqueKeys.iterator().next().toArray)
-          } else {
-            // no other choices, have to use retract rank
-            RetractRank
-          }
-        }
-      }
-    } else {
-      AppendFastRank
-    }
+  override def getInputNodes: util.List[ExecNode[StreamTableEnvironment, _]] = {
+    List(getInput.asInstanceOf[ExecNode[StreamTableEnvironment, _]])
   }
-}
 
-/**
-  * Base class of Strategy to choose different process function.
-  */
-sealed trait RankStrategy
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[StreamTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
 
-case object AppendFastRank extends RankStrategy
+  override protected def translateToPlanInternal(
+      tableEnv: StreamTableEnvironment): StreamTransformation[BaseRow] = {
+    val tableConfig = tableEnv.getConfig
+    rankType match {
+      case RankType.ROW_NUMBER => // ignore
+      case RankType.RANK =>
+        throw new TableException("RANK() on streaming table is not supported currently")
+      case RankType.DENSE_RANK =>
+        throw new TableException("DENSE_RANK() on streaming table is not supported currently")
+      case k =>
+        throw new TableException(s"Streaming tables do not support $k rank function.")
+    }
 
-case object RetractRank extends RankStrategy
+    val inputRowTypeInfo = BaseRowTypeInfo.of(
+      FlinkTypeFactory.toLogicalRowType(getInput.getRowType))
+    val fieldCollations = orderKey.getFieldCollations
+    val (sortFields, sortDirections, nullsIsLast) = SortUtil.getKeysAndOrders(fieldCollations)
+    val sortKeySelector = KeySelectorUtil.getBaseRowSelector(sortFields, inputRowTypeInfo)
+    val sortKeyType = sortKeySelector.getProducedType
+    val sortKeyComparator = ComparatorCodeGenerator.gen(tableConfig, "StreamExecSortComparator",
+      sortFields.indices.toArray, sortKeyType.getLogicalTypes, sortDirections, nullsIsLast)
+    val generateRetraction = StreamExecRetractionRules.isAccRetract(this)
+    val cacheSize = tableConfig.getConf.getLong(TableConfigOptions.SQL_EXEC_TOPN_CACHE_SIZE)
+    val minIdleStateRetentionTime = tableConfig.getMinIdleStateRetentionTime
+    val maxIdleStateRetentionTime = tableConfig.getMaxIdleStateRetentionTime
 
-case class UpdateFastRank(primaryKeys: Array[Int]) extends RankStrategy {
-  override def toString: String = "UpdateFastRank" + primaryKeys.mkString("[", ",", "]")
-}
+    val processFunction = getStrategy(true) match {
+      case AppendFastStrategy =>
+        new AppendOnlyTopNFunction(
+          minIdleStateRetentionTime,
+          maxIdleStateRetentionTime,
+          inputRowTypeInfo,
+          sortKeyComparator,
+          sortKeySelector,
+          rankType,
+          rankRange,
+          generateRetraction,
+          outputRankNumber,
+          cacheSize)
 
-case class UnaryUpdateRank(primaryKeys: Array[Int]) extends RankStrategy {
-  override def toString: String = "UnaryUpdateRank" + primaryKeys.mkString("[", ",", "]")
+      case UpdateFastStrategy(primaryKeys) =>
+        val rowKeySelector = KeySelectorUtil.getBaseRowSelector(primaryKeys, inputRowTypeInfo)
+        new UpdatableTopNFunction(
+          minIdleStateRetentionTime,
+          maxIdleStateRetentionTime,
+          inputRowTypeInfo,
+          rowKeySelector,
+          sortKeyComparator,
+          sortKeySelector,
+          rankType,
+          rankRange,
+          generateRetraction,
+          outputRankNumber,
+          cacheSize)
+
+      // TODO Use UnaryUpdateTopNFunction after SortedMapState is merged
+      case RetractStrategy =>
+        val equaliserCodeGen = new EqualiserCodeGenerator(inputRowTypeInfo.getLogicalTypes)
+        val generatedEqualiser = equaliserCodeGen.generateRecordEqualiser("RankValueEqualiser")
+
+        new RetractableTopNFunction(
+          minIdleStateRetentionTime,
+          maxIdleStateRetentionTime,
+          inputRowTypeInfo,
+          sortKeyComparator,
+          sortKeySelector,
+          rankType,
+          rankRange,
+          generatedEqualiser,
+          generateRetraction,
+          outputRankNumber)
+    }
+    val rankOpName = getOperatorName
+    val operator = new KeyedProcessOperator(processFunction)
+    processFunction.setKeyContext(operator)
+    val inputTransform = getInputNodes.get(0).translateToPlan(tableEnv)
+      .asInstanceOf[StreamTransformation[BaseRow]]
+    val outputRowTypeInfo = BaseRowTypeInfo.of(
+      FlinkTypeFactory.toLogicalRowType(getRowType))
+    val ret = new OneInputTransformation(
+      inputTransform,
+      rankOpName,
+      operator,
+      outputRowTypeInfo,
+      tableEnv.execEnv.getParallelism)
+
+    if (partitionKey.isEmpty) {
+      ret.setParallelism(1)
+      ret.setMaxParallelism(1)
+    }
+
+    // set KeyType and Selector for state
+    val selector = KeySelectorUtil.getBaseRowSelector(partitionKey.toArray, inputRowTypeInfo)
+    ret.setStateKeySelector(selector)
+    ret.setStateKeyType(selector.getProducedType)
+    ret
+  }
+
+  private def getOperatorName: String = {
+    val inputRowType = inputRel.getRowType
+    var result = getStrategy().toString
+    result += s"(orderBy: (${RelExplainUtil.collationToString(orderKey, inputRowType)})"
+    if (partitionKey.nonEmpty) {
+      val partitionKeys = partitionKey.toArray
+      result += s", partitionBy: (${RelExplainUtil.fieldToString(partitionKeys, inputRowType)})"
+    }
+    result += s", ${getRowType.getFieldNames.mkString(", ")}"
+    result += s", ${rankRange.toString(inputRowType.getFieldNames)})"
+    result
+  }
 }

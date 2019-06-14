@@ -90,7 +90,8 @@ public class CheckpointSettingsSerializableTest extends TestLogger {
 					0L,
 					1,
 					CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
-					true),
+					true,
+					false),
 				new SerializedValue<StateBackend>(new CustomStateBackend(outOfClassPath)),
 				serHooks);
 
@@ -114,7 +115,6 @@ public class CheckpointSettingsSerializableTest extends TestLogger {
 			timeout,
 			new NoRestartStrategy(),
 			new UnregisteredMetricsGroup(),
-			10,
 			VoidBlobWriter.getInstance(),
 			timeout,
 			log);

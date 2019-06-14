@@ -19,9 +19,10 @@ package org.apache.flink.table.plan.util
 
 import org.apache.flink.table.CalcitePair
 import org.apache.flink.table.api.TableException
+import org.apache.flink.table.calcite.FlinkRelBuilder.NamedWindowProperty
+import org.apache.flink.table.functions.aggfunctions.DeclarativeAggregateFunction
 import org.apache.flink.table.functions.utils.TableSqlFunction
 import org.apache.flink.table.functions.{AggregateFunction, UserDefinedFunction}
-import org.apache.flink.table.plan.FlinkJoinRelType
 import org.apache.flink.table.plan.nodes.ExpressionFormat
 import org.apache.flink.table.plan.nodes.ExpressionFormat.ExpressionFormat
 
@@ -86,20 +87,6 @@ object RelExplainUtil {
       expressionFunc(expr, inputFieldNames, None)
     } else {
       ""
-    }
-  }
-
-  /**
-    * Converts [[FlinkJoinRelType]] to String.
-    */
-  def joinTypeToString(joinType: FlinkJoinRelType): String = {
-    joinType match {
-      case FlinkJoinRelType.INNER => "InnerJoin"
-      case FlinkJoinRelType.LEFT => "LeftOuterJoin"
-      case FlinkJoinRelType.RIGHT => "RightOuterJoin"
-      case FlinkJoinRelType.FULL => "FullOuterJoin"
-      case FlinkJoinRelType.SEMI => "LeftSemiJoin"
-      case FlinkJoinRelType.ANTI => "LeftAntiJoin"
     }
   }
 
@@ -188,9 +175,13 @@ object RelExplainUtil {
               val argList = List(offset)
               offset = offset + 1
               argList
+            case daf: DeclarativeAggregateFunction =>
+              val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
+              val argList = aggBufferTypes.indices.map(offset + _).toList
+              offset = offset + aggBufferTypes.length
+              argList
             case _ =>
-              // TODO supports DeclarativeAggregateFunction
-              throw new TableException("Unsupported now")
+              throw new TableException(s"Unsupported function: $udf")
           }
         }
         val argListNames = if (aggToDistinctMapping.contains(index)) {
@@ -209,7 +200,7 @@ object RelExplainUtil {
         }
     }
 
-    //output for agg
+    // output for agg
     val aggFunctions = aggCallToAggFunction.map(_._2)
     offset = fullGrouping.length
     val outFieldNames = aggFunctions.map { udf =>
@@ -223,9 +214,15 @@ object RelExplainUtil {
             val name = outputFieldNames(offset)
             offset = offset + 1
             name
+          case daf: DeclarativeAggregateFunction =>
+            val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
+            val name = aggBufferTypes.indices
+              .map(i => outputFieldNames(offset + i))
+              .mkString(", ")
+            offset = offset + aggBufferTypes.length
+            if (aggBufferTypes.length > 1) s"($name)" else name
           case _ =>
-            // TODO supports DeclarativeAggregateFunction
-            throw new TableException("Unsupported now")
+            throw new TableException(s"Unsupported function: $udf")
         }
       }
       outFieldName
@@ -317,6 +314,7 @@ object RelExplainUtil {
     }
     val isIncremental: Boolean = shuffleKey.isDefined
 
+    // TODO output local/global agg call names like Partial_XXX, Final_XXX
     val aggStrings = if (isLocal) {
       stringifyLocalAggregates(aggInfos, distinctInfos, distinctAggs, aggFilters, inFieldNames)
     } else if (isGlobal || isIncremental) {
@@ -412,9 +410,15 @@ object RelExplainUtil {
           val name = accNames(offset)
           offset = offset + 1
           name
+        case daf: DeclarativeAggregateFunction =>
+          val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
+          val name = aggBufferTypes.indices
+            .map(i => accNames(offset + i))
+            .mkString(", ")
+          offset = offset + aggBufferTypes.length
+          if (aggBufferTypes.length > 1) s"($name)" else name
         case _ =>
-          // TODO supports DeclarativeAggregateFunction
-          throw new TableException("Unsupported now")
+          throw new TableException(s"Unsupported function: ${info.function}")
       }
     }
     val distinctFieldNames = (offset until accNames.length).map(accNames)
@@ -584,6 +588,20 @@ object RelExplainUtil {
     s"Calc($name)"
   }
 
+  def conditionToString(
+      calcProgram: RexProgram,
+      f: (RexNode, List[String], Option[List[RexNode]]) => String): String = {
+    val cond = calcProgram.getCondition
+    val inputFieldNames = calcProgram.getInputRowType.getFieldNames.toList
+    val localExprs = calcProgram.getExprList.toList
+
+    if (cond != null) {
+      f(cond, inputFieldNames, Some(localExprs))
+    } else {
+      ""
+    }
+  }
+
   def selectionToString(
       calcProgram: RexProgram,
       expression: (RexNode, List[String], Option[List[RexNode]], ExpressionFormat) => String,
@@ -623,5 +641,177 @@ object RelExplainUtil {
     val udtfName = sqlFunction.toString
     val operands = rexCall.getOperands.map(expression(_, inFields, None)).mkString(",")
     s"table($udtfName($operands))"
+  }
+
+  def aggOperatorName(
+      prefix: String,
+      grouping: Array[Int],
+      auxGrouping: Array[Int],
+      inputRowType: RelDataType,
+      outputRowType: RelDataType,
+      aggCallToAggFunction: Seq[(AggregateCall, UserDefinedFunction)],
+      isMerge: Boolean,
+      isFinal: Boolean): String = {
+    val groupingStr = if (grouping.nonEmpty) {
+      s"groupBy:(${fieldToString(grouping, inputRowType)}),"
+    } else {
+      ""
+    }
+    val auxGroupingStr = if (auxGrouping.nonEmpty) {
+      s"auxGrouping:(${fieldToString(auxGrouping, inputRowType)}),"
+    } else {
+      ""
+    }
+
+    val selectString = s"select:(${
+      groupAggregationToString(
+        inputRowType,
+        outputRowType,
+        grouping,
+        auxGrouping,
+        aggCallToAggFunction,
+        isMerge,
+        isFinal)
+    }),"
+    s"$prefix($groupingStr$auxGroupingStr$selectString)"
+  }
+
+  def windowAggregationToString(
+      inputType: RelDataType,
+      grouping: Array[Int],
+      auxGrouping: Array[Int],
+      rowType: RelDataType,
+      aggCallToAggFunction: Seq[(AggregateCall, UserDefinedFunction)],
+      enableAssignPane: Boolean,
+      isMerge: Boolean,
+      isGlobal: Boolean): String = {
+    val prefix = if (isMerge) {
+      "Final_"
+    } else if (!isGlobal) {
+      "Partial_"
+    } else {
+      ""
+    }
+
+    val inFields = inputType.getFieldNames
+    val outFields = rowType.getFieldNames
+
+    /**
+      *  - local window agg input type: grouping keys + aux-grouping keys + agg arg list
+      *  - global window agg input type: grouping keys + timestamp + aux-grouping keys + agg buffer
+      *  agg buffer as agg merge args list
+      */
+    var offset = if (isMerge) {
+      grouping.length + 1 + auxGrouping.length
+    } else {
+      grouping.length + auxGrouping.length
+    }
+    val aggStrings = aggCallToAggFunction.map { case (aggCall, udf) =>
+      var newArgList = aggCall.getArgList.map(_.toInt).toList
+      if (isMerge) {
+        newArgList = udf match {
+          case _: AggregateFunction[_, _] =>
+            val argList = List(offset)
+            offset = offset + 1
+            argList
+          case daf: DeclarativeAggregateFunction =>
+            val argList = daf.aggBufferAttributes().indices.map(offset + _).toList
+            offset = offset + daf.aggBufferAttributes.length
+            argList
+        }
+      }
+      val argListNames = if (newArgList.nonEmpty) {
+        newArgList.map(inFields(_)).mkString(", ")
+      } else {
+        "*"
+      }
+      if (aggCall.filterArg >= 0 && aggCall.filterArg < inFields.size) {
+        s"${aggCall.getAggregation}($argListNames) FILTER ${inFields(aggCall.filterArg)}"
+      } else {
+        s"${aggCall.getAggregation}($argListNames)"
+      }
+    }
+
+    /**
+      * - local window agg output type: grouping keys + timestamp + aux-grouping keys + agg buffer
+      * - global window agg output type:
+      * grouping keys + aux-grouping keys + agg result + window props
+      */
+    offset = if (!isGlobal) {
+      grouping.length + 1 + auxGrouping.length
+    } else {
+      grouping.length + auxGrouping.length
+    }
+    val outFieldNames = aggCallToAggFunction.map { case (_, udf) =>
+      val outFieldName = if (isGlobal) {
+        val name = outFields(offset)
+        offset = offset + 1
+        name
+      } else {
+        udf match {
+          case _: AggregateFunction[_, _] =>
+            val name = outFields(offset)
+            offset = offset + 1
+            name
+          case daf: DeclarativeAggregateFunction =>
+            val name = daf.aggBufferAttributes().zipWithIndex.map(offset + _._2).map(
+              outFields(_)).mkString(", ")
+            offset = offset + daf.aggBufferAttributes().length
+            if (daf.aggBufferAttributes.length > 1) s"($name)" else name
+        }
+      }
+      outFieldName
+    }
+
+    val inNames = grouping.map(inFields(_)) ++ auxGrouping.map(inFields(_)) ++ aggStrings
+    val outNames = grouping.indices.map(outFields(_)) ++
+        (grouping.length + 1 until grouping.length + 1 + auxGrouping.length).map(outFields(_)) ++
+        outFieldNames
+    inNames.zip(outNames).map {
+      case (f, o) => if (f == o) {
+        f
+      } else {
+        s"$prefix$f AS $o"
+      }
+    }.mkString(", ")
+  }
+
+  def streamWindowAggregationToString(
+      inputType: RelDataType,
+      grouping: Array[Int],
+      rowType: RelDataType,
+      aggs: Seq[AggregateCall],
+      namedProperties: Seq[NamedWindowProperty],
+      withOutputFieldNames: Boolean = true): String = {
+    val inFields = inputType.getFieldNames
+    val outFields = rowType.getFieldNames
+    val groupStrings = grouping.map(inFields(_))
+
+    val aggStrings = aggs.map(a => {
+      val distinct = if (a.isDistinct) {
+        if (a.getArgList.size() == 0) {
+          "DISTINCT"
+        } else {
+          "DISTINCT "
+        }
+      } else {
+        ""
+      }
+      val argList = if (a.getArgList.size() > 0) {
+        a.getArgList.map(inFields(_)).mkString(", ")
+      } else {
+        "*"
+      }
+      s"${a.getAggregation}($distinct$argList)"
+    })
+
+    val propStrings = namedProperties.map(_.property.toString)
+    (groupStrings ++ aggStrings ++ propStrings).zip(outFields).map {
+      case (f, o) => if (f == o) {
+        f
+      } else {
+        if (withOutputFieldNames) s"$f AS $o" else f
+      }
+    }.mkString(", ")
   }
 }

@@ -41,6 +41,7 @@ import org.apache.flink.runtime.executiongraph.utils.SimpleSlotProvider;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
@@ -361,7 +362,8 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 			1L,
 			3,
 			CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
-			true);
+			true,
+			false);
 
 		final ExecutionGraph graph = createSampleGraph(
 			jid,
@@ -400,7 +402,8 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 				1,
 				allVertices,
 				checkpointCoordinatorConfiguration,
-				UnregisteredMetricGroups.createUnregisteredTaskMetricGroup()));
+				UnregisteredMetricGroups.createUnregisteredTaskMetricGroup()),
+			false);
 
 		final CheckpointCoordinator checkpointCoordinator = graph.getCheckpointCoordinator();
 
@@ -424,14 +427,16 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 			any(JobID.class),
 			anyLong(),
 			anyLong(),
-			any(CheckpointOptions.class));
+			any(CheckpointOptions.class),
+			any(Boolean.class));
 
 		verify(taskManagerGateway, timeout(verifyTimeout).times(3)).triggerCheckpoint(
 			eq(vertex2.getCurrentExecutionAttempt().getAttemptId()),
 			any(JobID.class),
 			anyLong(),
 			anyLong(),
-			any(CheckpointOptions.class));
+			any(CheckpointOptions.class),
+			any(Boolean.class));
 
 		assertEquals(3, checkpointCoordinator.getNumberOfPendingCheckpoints());
 
@@ -441,7 +446,8 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 			new AcknowledgeCheckpoint(
 				graph.getJobID(),
 				vertex1.getCurrentExecutionAttempt().getAttemptId(),
-				checkpointToAcknowledge));
+				checkpointToAcknowledge),
+				"Unknown location");
 
 		Map<Long, PendingCheckpoint> oldPendingCheckpoints = new HashMap<>(3);
 
@@ -521,7 +527,8 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 
 		@Override
 		protected FailoverRegion createFailoverRegion(ExecutionGraph eg, List<ExecutionVertex> connectedExecutions) {
-			return new FailoverRegion(eg, connectedExecutions) {
+			Map<JobVertexID, ExecutionJobVertex> tasks = initTasks(connectedExecutions);
+			return new FailoverRegion(eg, connectedExecutions, tasks) {
 				@Override
 				protected CompletableFuture<Void> createTerminationFutureOverAllConnectedVertexes() {
 					ArrayList<CompletableFuture<?>> terminationAndBlocker = new ArrayList<>(2);

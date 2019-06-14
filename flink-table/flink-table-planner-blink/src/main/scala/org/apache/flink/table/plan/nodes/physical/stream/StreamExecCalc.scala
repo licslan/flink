@@ -27,6 +27,7 @@ import org.apache.flink.table.plan.nodes.common.CommonCalc
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
 import org.apache.flink.table.plan.util.RelExplainUtil
 import org.apache.flink.table.runtime.AbstractProcessStreamOperator
+import org.apache.flink.table.typeutils.BaseRowTypeInfo
 
 import org.apache.calcite.plan.{RelOptCluster, RelTraitSet}
 import org.apache.calcite.rel.RelNode
@@ -67,8 +68,16 @@ class StreamExecCalc(
     new StreamExecCalc(cluster, traitSet, child, program, outputRowType)
   }
 
+  //~ ExecNode methods -----------------------------------------------------------
+
   override def getInputNodes: util.List[ExecNode[StreamTableEnvironment, _]] =
     List(getInput.asInstanceOf[ExecNode[StreamTableEnvironment, _]])
+
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[StreamTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
 
   override def translateToPlanInternal(
       tableEnv: StreamTableEnvironment): StreamTransformation[BaseRow] = {
@@ -95,7 +104,7 @@ class StreamExecCalc(
 
     val ctx = CodeGeneratorContext(config).setOperatorBaseClass(
       classOf[AbstractProcessStreamOperator[BaseRow]])
-    val outputType = FlinkTypeFactory.toInternalRowType(getRowType)
+    val outputType = FlinkTypeFactory.toLogicalRowType(getRowType)
     val substituteStreamOperator = CalcCodeGenerator.generateCalcOperator(
       ctx,
       cluster,
@@ -111,7 +120,7 @@ class StreamExecCalc(
       inputTransform,
       RelExplainUtil.calcToString(calcProgram, getExpressionString),
       substituteStreamOperator,
-      outputType.toTypeInfo,
+      BaseRowTypeInfo.of(outputType),
       inputTransform.getParallelism)
   }
 }

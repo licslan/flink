@@ -47,7 +47,6 @@ under the License.
 		<module>flink-stream-stateful-job-upgrade-test</module>
 		<module>flink-queryable-state-test</module>
 		<module>flink-local-recovery-and-allocation-test</module>
-		<module>flink-elasticsearch1-test</module>
 		<module>flink-elasticsearch2-test</module>
 		<module>flink-elasticsearch5-test</module>
 		<module>flink-elasticsearch6-test</module>
@@ -66,6 +65,7 @@ under the License.
 		<module>flink-streaming-kafka-test</module>
 		<module>flink-streaming-kafka011-test</module>
 		<module>flink-streaming-kafka010-test</module>
+		<module>flink-plugins-test</module>
 	</modules>
 
 	<!-- See main pom.xml for explanation of profiles -->

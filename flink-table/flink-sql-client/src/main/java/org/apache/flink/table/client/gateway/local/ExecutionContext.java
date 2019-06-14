@@ -29,6 +29,7 @@ import org.apache.flink.client.deployment.ClusterDescriptor;
 import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.plugin.TemporaryClassLoaderContext;
 import org.apache.flink.optimizer.DataStatistics;
 import org.apache.flink.optimizer.Optimizer;
 import org.apache.flink.optimizer.costs.DefaultCostEstimator;
@@ -45,6 +46,7 @@ import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.java.BatchTableEnvironment;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
+import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.client.config.Environment;
 import org.apache.flink.table.client.config.entries.DeploymentEntry;
 import org.apache.flink.table.client.config.entries.ExecutionEntry;
@@ -57,6 +59,7 @@ import org.apache.flink.table.client.gateway.SessionContext;
 import org.apache.flink.table.client.gateway.SqlExecutionException;
 import org.apache.flink.table.factories.BatchTableSinkFactory;
 import org.apache.flink.table.factories.BatchTableSourceFactory;
+import org.apache.flink.table.factories.CatalogFactory;
 import org.apache.flink.table.factories.StreamTableSinkFactory;
 import org.apache.flink.table.factories.StreamTableSourceFactory;
 import org.apache.flink.table.factories.TableFactoryService;
@@ -73,9 +76,10 @@ import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Options;
 
 import java.net.URL;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -91,6 +95,7 @@ public class ExecutionContext<T> {
 	private final Environment mergedEnv;
 	private final List<URL> dependencies;
 	private final ClassLoader classLoader;
+	private final Map<String, Catalog> catalogs;
 	private final Map<String, TableSource<?>> tableSources;
 	private final Map<String, TableSink<?>> tableSinks;
 	private final Map<String, UserDefinedFunction> functions;
@@ -113,9 +118,15 @@ public class ExecutionContext<T> {
 			dependencies.toArray(new URL[dependencies.size()]),
 			this.getClass().getClassLoader());
 
+		// create catalogs
+		catalogs = new LinkedHashMap<>();
+		mergedEnv.getCatalogs().forEach((name, entry) ->
+			catalogs.put(name, createCatalog(name, entry.asMap(), classLoader))
+		);
+
 		// create table sources & sinks.
-		tableSources = new HashMap<>();
-		tableSinks = new HashMap<>();
+		tableSources = new LinkedHashMap<>();
+		tableSinks = new LinkedHashMap<>();
 		mergedEnv.getTables().forEach((name, entry) -> {
 			if (entry instanceof SourceTableEntry || entry instanceof SourceSinkTableEntry) {
 				tableSources.put(name, createTableSource(mergedEnv.getExecution(), entry.asMap(), classLoader));
@@ -126,7 +137,7 @@ public class ExecutionContext<T> {
 		});
 
 		// create user-defined functions
-		functions = new HashMap<>();
+		functions = new LinkedHashMap<>();
 		mergedEnv.getFunctions().forEach((name, entry) -> {
 			final UserDefinedFunction function = FunctionService.createFunction(entry.getDescriptor(), classLoader, false);
 			functions.put(name, function);
@@ -173,6 +184,10 @@ public class ExecutionContext<T> {
 		}
 	}
 
+	public Map<String, Catalog> getCatalogs() {
+		return catalogs;
+	}
+
 	public Map<String, TableSource<?>> getTableSources() {
 		return tableSources;
 	}
@@ -185,12 +200,8 @@ public class ExecutionContext<T> {
 	 * Executes the given supplier using the execution context's classloader as thread classloader.
 	 */
 	public <R> R wrapClassLoader(Supplier<R> supplier) {
-		final ClassLoader previousClassloader = Thread.currentThread().getContextClassLoader();
-		Thread.currentThread().setContextClassLoader(classLoader);
-		try {
+		try (TemporaryClassLoaderContext tmpCl = new TemporaryClassLoaderContext(classLoader)){
 			return supplier.get();
-		} finally {
-			Thread.currentThread().setContextClassLoader(previousClassloader);
 		}
 	}
 
@@ -228,6 +239,12 @@ public class ExecutionContext<T> {
 		} catch (FlinkException e) {
 			throw new SqlExecutionException("Could not create cluster specification for the given deployment.", e);
 		}
+	}
+
+	private Catalog createCatalog(String name, Map<String, String> catalogProperties, ClassLoader classLoader) {
+		final CatalogFactory factory =
+			TableFactoryService.find(CatalogFactory.class, catalogProperties, classLoader);
+		return factory.createCatalog(name, catalogProperties);
 	}
 
 	private static TableSource<?> createTableSource(ExecutionEntry execution, Map<String, String> sourceProperties, ClassLoader classLoader) {
@@ -282,6 +299,19 @@ public class ExecutionContext<T> {
 				tableEnv = BatchTableEnvironment.create(execEnv);
 			} else {
 				throw new SqlExecutionException("Unsupported execution type specified.");
+			}
+
+			// register catalogs
+			catalogs.forEach(tableEnv::registerCatalog);
+
+			Optional<String> potentialCurrentCatalog = mergedEnv.getExecution().getCurrentCatalog();
+			if (potentialCurrentCatalog.isPresent()) {
+				tableEnv.useCatalog(potentialCurrentCatalog.get());
+			}
+
+			Optional<String> potentialCurrentDatabase = mergedEnv.getExecution().getCurrentDatabase();
+			if (potentialCurrentDatabase.isPresent()) {
+				tableEnv.useDatabase(potentialCurrentDatabase.get());
 			}
 
 			// create query config

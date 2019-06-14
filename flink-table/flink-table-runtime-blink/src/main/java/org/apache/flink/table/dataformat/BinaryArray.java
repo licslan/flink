@@ -20,8 +20,7 @@ package org.apache.flink.table.dataformat;
 
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
-import org.apache.flink.table.type.InternalType;
-import org.apache.flink.table.type.InternalTypes;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.util.SegmentsUtil;
 
 import static org.apache.flink.core.memory.MemoryUtils.UNSAFE;
@@ -42,7 +41,6 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 	private static final int BYTE_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
 	private static final int BOOLEAN_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(boolean[].class);
 	private static final int SHORT_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(short[].class);
-	private static final int CHAR_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(char[].class);
 	private static final int INT_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(int[].class);
 	private static final int LONG_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(long[].class);
 	private static final int FLOAT_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(float[].class);
@@ -56,27 +54,23 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 	 * It store real value when type is primitive.
 	 * It store the length and offset of variable-length part when type is string, map, etc.
 	 */
-	public static int calculateFixLengthPartSize(InternalType type) {
-		if (type.equals(InternalTypes.BOOLEAN)) {
-			return 1;
-		} else if (type.equals(InternalTypes.BYTE)) {
-			return 1;
-		} else if (type.equals(InternalTypes.SHORT)) {
-			return 2;
-		} else if (type.equals(InternalTypes.INT)) {
-			return 4;
-		} else if (type.equals(InternalTypes.FLOAT)) {
-			return 4;
-		} else if (type.equals(InternalTypes.CHAR)) {
-			return 2;
-		} else if (type.equals(InternalTypes.DATE)) {
-			return 4;
-		} else if (type.equals(InternalTypes.TIME)) {
-			return 4;
-		} else {
-			// long, double is 8 bytes.
-			// It store the length and offset of variable-length part when type is string, map, etc.
-			return 8;
+	public static int calculateFixLengthPartSize(LogicalType type) {
+		switch (type.getTypeRoot()) {
+			case BOOLEAN:
+			case TINYINT:
+				return 1;
+			case SMALLINT:
+				return 2;
+			case INTEGER:
+			case FLOAT:
+			case DATE:
+			case TIME_WITHOUT_TIME_ZONE:
+			case INTERVAL_YEAR_MONTH:
+				return 4;
+			default:
+				// long, double is 8 bytes.
+				// It store the length and offset of variable-length part when type is string, map, etc.
+				return 8;
 		}
 	}
 
@@ -326,19 +320,6 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 	}
 
 	@Override
-	public char getChar(int pos) {
-		assertIndexIsValid(pos);
-		return SegmentsUtil.getChar(segments, getElementOffset(pos, 2));
-	}
-
-	@Override
-	public void setChar(int pos, char value) {
-		assertIndexIsValid(pos);
-		setNotNullAt(pos);
-		SegmentsUtil.setChar(segments, getElementOffset(pos, 2), value);
-	}
-
-	@Override
 	public void setDecimal(int pos, Decimal value, int precision) {
 		assertIndexIsValid(pos);
 
@@ -367,12 +348,6 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 				setLong(pos, ((long) cursor << 32) | ((long) bytes.length));
 			}
 		}
-	}
-
-	public void setNullChar(int pos) {
-		assertIndexIsValid(pos);
-		SegmentsUtil.bitSet(segments, offset + 4, pos);
-		SegmentsUtil.setChar(segments, getElementOffset(pos, 2), '\0');
 	}
 
 	public boolean anyNull() {
@@ -411,14 +386,6 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 		short[] values = new short[numElements];
 		SegmentsUtil.copyToUnsafe(
 				segments, elementOffset, values, SHORT_ARRAY_OFFSET, numElements * 2);
-		return values;
-	}
-
-	public char[] toCharArray() {
-		checkNoNull();
-		char[] values = new char[numElements];
-		SegmentsUtil.copyToUnsafe(
-				segments, elementOffset, values, CHAR_ARRAY_OFFSET, numElements * 2);
 		return values;
 	}
 
@@ -503,10 +470,6 @@ public final class BinaryArray extends BinaryFormat implements TypeGetterSetters
 
 	public static BinaryArray fromPrimitiveArray(short[] arr) {
 		return fromPrimitiveArray(arr, SHORT_ARRAY_OFFSET, arr.length, 2);
-	}
-
-	public static BinaryArray fromPrimitiveArray(char[] arr) {
-		return fromPrimitiveArray(arr, CHAR_ARRAY_OFFSET, arr.length, 2);
 	}
 
 	public static BinaryArray fromPrimitiveArray(int[] arr) {

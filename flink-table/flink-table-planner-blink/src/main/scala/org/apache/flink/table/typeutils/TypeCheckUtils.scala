@@ -18,82 +18,83 @@
 
 package org.apache.flink.table.typeutils
 
-import org.apache.flink.table.`type`._
 import org.apache.flink.table.codegen.GeneratedExpression
+import org.apache.flink.table.types.logical.LogicalTypeRoot._
+import org.apache.flink.table.types.logical._
 
 object TypeCheckUtils {
 
-  def isNumeric(dataType: InternalType): Boolean = dataType match {
-    case InternalTypes.INT | InternalTypes.BYTE | InternalTypes.SHORT
-         | InternalTypes.LONG | InternalTypes.FLOAT | InternalTypes.DOUBLE => true
-    case _: DecimalType => true
-    case _ => false
-  }
+  def isNumeric(dataType: LogicalType): Boolean =
+    dataType.getTypeRoot.getFamilies.contains(LogicalTypeFamily.NUMERIC)
 
-  def isTemporal(dataType: InternalType): Boolean =
+  def isTemporal(dataType: LogicalType): Boolean =
     isTimePoint(dataType) || isTimeInterval(dataType)
 
-  def isTimePoint(dataType: InternalType): Boolean = dataType match {
-    case InternalTypes.INTERVAL_MILLIS | InternalTypes.INTERVAL_MONTHS => false
-    case _: TimeType | _: DateType | _: TimestampType => true
+  def isTimePoint(dataType: LogicalType): Boolean = dataType.getTypeRoot match {
+    case TIME_WITHOUT_TIME_ZONE | DATE | TIMESTAMP_WITHOUT_TIME_ZONE => true
     case _ => false
   }
 
-  def isRowTime(dataType: InternalType): Boolean =
-    dataType == InternalTypes.ROWTIME_INDICATOR
+  def isRowTime(dataType: LogicalType): Boolean =
+    dataType match {
+      case t: TimestampType => t.getKind == TimestampKind.ROWTIME
+      case _ => false
+    }
 
-  def isProcTime(dataType: InternalType): Boolean =
-    dataType == InternalTypes.PROCTIME_INDICATOR
+  def isProcTime(dataType: LogicalType): Boolean =
+    dataType match {
+      case t: TimestampType => t.getKind == TimestampKind.PROCTIME
+      case _ => false
+    }
 
-  def isTimeInterval(dataType: InternalType): Boolean = dataType match {
-    case InternalTypes.INTERVAL_MILLIS | InternalTypes.INTERVAL_MONTHS => true
+  def isTimeInterval(dataType: LogicalType): Boolean = dataType.getTypeRoot match {
+    case INTERVAL_YEAR_MONTH | INTERVAL_DAY_TIME => true
     case _ => false
   }
 
-  def isString(dataType: InternalType): Boolean = dataType == InternalTypes.STRING
+  def isVarchar(dataType: LogicalType): Boolean = dataType.getTypeRoot == VARCHAR
 
-  def isBinary(dataType: InternalType): Boolean = dataType == InternalTypes.BINARY
+  def isBinary(dataType: LogicalType): Boolean = dataType.getTypeRoot == BINARY
 
-  def isBoolean(dataType: InternalType): Boolean = dataType == InternalTypes.BOOLEAN
+  def isBoolean(dataType: LogicalType): Boolean = dataType.getTypeRoot == BOOLEAN
 
-  def isDecimal(dataType: InternalType): Boolean = dataType.isInstanceOf[DecimalType]
+  def isDecimal(dataType: LogicalType): Boolean = dataType.getTypeRoot == DECIMAL
 
-  def isInteger(dataType: InternalType): Boolean = dataType == InternalTypes.INT
+  def isInteger(dataType: LogicalType): Boolean = dataType.getTypeRoot == INTEGER
 
-  def isLong(dataType: InternalType): Boolean = dataType == InternalTypes.LONG
+  def isLong(dataType: LogicalType): Boolean = dataType.getTypeRoot == BIGINT
 
-  def isArray(dataType: InternalType): Boolean = dataType.isInstanceOf[ArrayType]
+  def isArray(dataType: LogicalType): Boolean = dataType.getTypeRoot == ARRAY
 
-  def isMap(dataType: InternalType): Boolean = dataType.isInstanceOf[MapType]
+  def isMap(dataType: LogicalType): Boolean = dataType.getTypeRoot == MAP
 
-  def isComparable(dataType: InternalType): Boolean =
-    !dataType.isInstanceOf[GenericType[_]] &&
-      !dataType.isInstanceOf[MapType] &&
-      !dataType.isInstanceOf[RowType] &&
-      !isArray(dataType)
+  def isAny(dataType: LogicalType): Boolean = dataType.getTypeRoot == ANY
 
-  def isMutable(dataType: InternalType): Boolean = dataType match {
+  def isRow(dataType: LogicalType): Boolean = dataType.getTypeRoot == ROW
+
+  def isComparable(dataType: LogicalType): Boolean =
+    !isAny(dataType) && !isMap(dataType) && !isRow(dataType) && !isArray(dataType)
+
+  def isMutable(dataType: LogicalType): Boolean = dataType.getTypeRoot match {
     // the internal representation of String is BinaryString which is mutable
-    case InternalTypes.STRING => true
-    case _: ArrayType | _: MapType | _: RowType | _: GenericType[_] => true
+    case VARCHAR => true
+    case ARRAY | MULTISET | MAP | ROW | ANY => true
     case _ => false
   }
 
-  def isReference(t: InternalType): Boolean = t match {
-    case InternalTypes.INT
-         | InternalTypes.LONG
-         | InternalTypes.SHORT
-         | InternalTypes.BYTE
-         | InternalTypes.FLOAT
-         | InternalTypes.DOUBLE
-         | InternalTypes.BOOLEAN
-         | InternalTypes.CHAR
-         | _: DateType
-         | InternalTypes.TIME
-         | _: TimestampType => false
+  def isReference(t: LogicalType): Boolean = t.getTypeRoot match {
+    case INTEGER |
+         TINYINT |
+         SMALLINT |
+         BIGINT |
+         FLOAT |
+         DOUBLE |
+         BOOLEAN |
+         DATE |
+         TIME_WITHOUT_TIME_ZONE |
+         TIMESTAMP_WITHOUT_TIME_ZONE => false
     case _ => true
   }
 
   def isReference(genExpr: GeneratedExpression): Boolean = isReference(genExpr.resultType)
-
 }

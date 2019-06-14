@@ -64,6 +64,14 @@ class BatchExecValues(
 
   override def getDamBehavior: DamBehavior = DamBehavior.PIPELINED
 
+  override def getInputNodes: util.List[ExecNode[BatchTableEnvironment, _]] = List()
+
+  override def replaceInputNode(
+      ordinalInParent: Int,
+      newInputNode: ExecNode[BatchTableEnvironment, _]): Unit = {
+    replaceInput(ordinalInParent, newInputNode.asInstanceOf[RelNode])
+  }
+
   override protected def translateToPlanInternal(
       tableEnv: BatchTableEnvironment): StreamTransformation[BaseRow] = {
     val inputFormat = ValuesCodeGenerator.generatorInputFormat(
@@ -71,11 +79,10 @@ class BatchExecValues(
       getRowType,
       tuples,
       getRelTypeName)
-    tableEnv.streamEnv.createInput(inputFormat, inputFormat.getProducedType).getTransformation
-  }
-
-  override def getInputNodes: util.List[ExecNode[BatchTableEnvironment, _]] = {
-    new util.ArrayList[ExecNode[BatchTableEnvironment, _]]()
+    val transformation = tableEnv.streamEnv.createInput(inputFormat,
+      inputFormat.getProducedType).getTransformation
+    transformation.setParallelism(getResource.getParallelism)
+    transformation
   }
 
 }

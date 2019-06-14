@@ -18,6 +18,7 @@
 
 package org.apache.flink.table.api
 
+import org.apache.flink.api.common.JobExecutionResult
 import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.runtime.state.filesystem.FsStateBackend
@@ -25,22 +26,24 @@ import org.apache.flink.runtime.state.memory.MemoryStateBackend
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
+import org.apache.flink.streaming.api.graph.{StreamGraph, StreamGraphGenerator}
 import org.apache.flink.streaming.api.transformations.StreamTransformation
-import org.apache.flink.table.calcite.FlinkRelBuilder
 import org.apache.flink.table.dataformat.BaseRow
+import org.apache.flink.table.plan.`trait`.{AccModeTraitDef, FlinkRelDistributionTraitDef, MiniBatchIntervalTraitDef, UpdateAsRetractionTraitDef}
 import org.apache.flink.table.plan.nodes.calcite.LogicalSink
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
-import org.apache.flink.table.plan.optimize.{Optimizer, StreamOptimizer}
+import org.apache.flink.table.plan.optimize.{Optimizer, StreamCommonSubGraphBasedOptimizer}
 import org.apache.flink.table.plan.schema._
 import org.apache.flink.table.plan.stats.FlinkStatistic
-import org.apache.flink.table.plan.`trait`.{AccModeTraitDef, FlinkRelDistributionTraitDef, MiniBatchIntervalTraitDef, UpdateAsRetractionTraitDef}
-import org.apache.flink.table.plan.util.FlinkRelOptUtil
-import org.apache.flink.table.sinks.{DataStreamTableSink, TableSink}
-import org.apache.flink.table.sources.{StreamTableSource, TableSource}
-import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo
-
-import org.apache.calcite.plan.ConventionTraitDef
-import org.apache.calcite.rel.RelCollationTraitDef
+import org.apache.flink.table.plan.util.{ExecNodePlanDumper, FlinkRelOptUtil}
+import org.apache.flink.table.sinks.DataStreamTableSink
+import org.apache.flink.table.sources.{LookupableTableSource, StreamTableSource, TableSource}
+import org.apache.flink.table.types.{DataType, LogicalTypeDataTypeConverter}
+import org.apache.flink.table.types.logical.{LogicalType, RowType}
+import org.apache.flink.table.types.utils.TypeConversions.fromLegacyInfoToDataType
+import org.apache.flink.table.typeutils.{TimeIndicatorTypeInfo, TypeCheckUtils}
+import org.apache.flink.table.util.PlanUtil
+import org.apache.calcite.plan.{ConventionTraitDef, RelTrait, RelTraitDef}
 import org.apache.calcite.sql.SqlExplainLevel
 
 import _root_.scala.collection.JavaConversions._
@@ -63,7 +66,7 @@ import _root_.scala.collection.JavaConversions._
 abstract class StreamTableEnvironment(
     private[flink] val execEnv: StreamExecutionEnvironment,
     config: TableConfig)
-  extends TableEnvironment(config) {
+  extends TableEnvironment(execEnv, config) {
 
   // prefix  for unique table names.
   override private[flink] val tableNamePrefix = "_DataStreamTable_"
@@ -75,7 +78,16 @@ abstract class StreamTableEnvironment(
 
   override def queryConfig: StreamQueryConfig = new StreamQueryConfig
 
-  override protected def getOptimizer: Optimizer = new StreamOptimizer(this)
+  override protected def getTraitDefs: Array[RelTraitDef[_ <: RelTrait]] = {
+    Array(
+      ConventionTraitDef.INSTANCE,
+      FlinkRelDistributionTraitDef.INSTANCE,
+      MiniBatchIntervalTraitDef.INSTANCE,
+      UpdateAsRetractionTraitDef.INSTANCE,
+      AccModeTraitDef.INSTANCE)
+  }
+
+  override protected def getOptimizer: Optimizer = new StreamCommonSubGraphBasedOptimizer(this)
 
   /**
     * Checks if the chosen table name is valid.
@@ -92,17 +104,21 @@ abstract class StreamTableEnvironment(
     }
   }
 
-  // the builder for Calcite RelNodes, Calcite's representation of a relational expression tree.
-  override protected def createRelBuilder: FlinkRelBuilder = FlinkRelBuilder.create(
-    frameworkConfig,
-    Array(
-      ConventionTraitDef.INSTANCE,
-      FlinkRelDistributionTraitDef.INSTANCE,
-      RelCollationTraitDef.INSTANCE,
-      MiniBatchIntervalTraitDef.INSTANCE,
-      UpdateAsRetractionTraitDef.INSTANCE,
-      AccModeTraitDef.INSTANCE)
-  )
+  override def execute(jobName: String): JobExecutionResult = {
+    generateStreamGraph(jobName)
+    // TODO supports execEnv.execute(streamGraph)
+    execEnv.execute(jobName)
+  }
+
+  protected override def translateStreamGraph(
+      streamingTransformations: Seq[StreamTransformation[_]],
+      jobName: Option[String] = None): StreamGraph = {
+    mergeParameters()
+
+    val streamGraph = StreamGraphGenerator.generate(execEnv, streamingTransformations.toList)
+    streamGraph.setJobName(jobName.getOrElse(DEFAULT_JOB_NAME))
+    streamGraph
+  }
 
   /**
     * Merge global job parameters and table config parameters,
@@ -130,24 +146,6 @@ abstract class StreamTableEnvironment(
       execEnv.getConfig.setGlobalJobParameters(parameters)
       isConfigMerged = true
     }
-  }
-
-  /**
-    * Writes a [[Table]] to a [[TableSink]].
-    *
-    * Internally, the [[Table]] is translated into a [[DataStream]] and handed over to the
-    * [[TableSink]] to write it.
-    *
-    * @param table The [[Table]] to write.
-    * @param sink The [[TableSink]] to write the [[Table]] to.
-    * @tparam T The expected type of the [[DataStream]] which represents the [[Table]].
-    */
-  override private[table] def writeToSink[T](
-      table: Table,
-      sink: TableSink[T],
-      sinkName: String): Unit = {
-    val sinkNode = LogicalSink.create(table.asInstanceOf[TableImpl].getRelNode, sink, sinkName)
-    translateSink(sinkNode)
   }
 
   /**
@@ -180,10 +178,13 @@ abstract class StreamTableEnvironment(
     mergeParameters()
 
     val optimizedPlan = optimize(sink)
-    val optimizedNodes = translateNodeDag(Seq(optimizedPlan))
+    val optimizedNodes = translateToExecNodeDag(Seq(optimizedPlan))
     require(optimizedNodes.size() == 1)
     translateToPlan(optimizedNodes.head)
   }
+
+  override protected def translateToPlan(
+      sinks: Seq[ExecNode[_, _]]): Seq[StreamTransformation[_]] = sinks.map(translateToPlan)
 
   /**
     * Translates a [[StreamExecNode]] plan into a [[StreamTransformation]].
@@ -217,12 +218,15 @@ abstract class StreamTableEnvironment(
     */
   def explain(table: Table, extended: Boolean): String = {
     val ast = table.asInstanceOf[TableImpl].getRelNode
-    val optimizedNode = optimize(ast)
+    val execNodeDag = compileToExecNodePlan(ast)
+    val transformations = translateToPlan(execNodeDag)
+    val streamGraph = translateStreamGraph(transformations)
+    val executionPlan = PlanUtil.explainStreamGraph(streamGraph)
 
-    val explainLevel = if (extended) {
-      SqlExplainLevel.ALL_ATTRIBUTES
+    val (explainLevel, withRetractTraits) = if (extended) {
+      (SqlExplainLevel.ALL_ATTRIBUTES, true)
     } else {
-      SqlExplainLevel.EXPPLAN_ATTRIBUTES
+      (SqlExplainLevel.EXPPLAN_ATTRIBUTES, false)
     }
 
     s"== Abstract Syntax Tree ==" +
@@ -231,9 +235,16 @@ abstract class StreamTableEnvironment(
       System.lineSeparator +
       s"== Optimized Logical Plan ==" +
       System.lineSeparator +
-      s"${FlinkRelOptUtil.toString(optimizedNode, explainLevel)}" +
-      System.lineSeparator
-    // TODO show Physical Execution Plan
+      s"${
+        ExecNodePlanDumper.dagToString(
+          execNodeDag,
+          explainLevel,
+          withRetractTraits = withRetractTraits)
+      }" +
+      System.lineSeparator +
+      s"== Physical Execution Plan ==" +
+      System.lineSeparator +
+      s"$executionPlan"
   }
 
   /**
@@ -249,8 +260,37 @@ abstract class StreamTableEnvironment(
     * @param extended Flag to include detailed optimizer estimates.
     */
   def explain(extended: Boolean): String = {
-    // TODO implements this method when supports multi-sinks
-    throw new TableException("Unsupported now")
+    val sinkExecNodes = compileToExecNodePlan(sinkNodes: _*)
+    // translate relNodes to StreamTransformations
+    val sinkTransformations = translateToPlan(sinkExecNodes)
+    val streamGraph = translateStreamGraph(sinkTransformations)
+    val sqlPlan = PlanUtil.explainStreamGraph(streamGraph)
+
+    val sb = new StringBuilder
+    sb.append("== Abstract Syntax Tree ==")
+    sb.append(System.lineSeparator)
+    sinkNodes.foreach { sink =>
+      sb.append(FlinkRelOptUtil.toString(sink))
+      sb.append(System.lineSeparator)
+    }
+
+    sb.append("== Optimized Logical Plan ==")
+    sb.append(System.lineSeparator)
+    val (explainLevel, withRetractTraits) = if (extended) {
+      (SqlExplainLevel.ALL_ATTRIBUTES, true)
+    } else {
+      (SqlExplainLevel.EXPPLAN_ATTRIBUTES, false)
+    }
+    sb.append(ExecNodePlanDumper.dagToString(
+      sinkExecNodes,
+      explainLevel,
+      withRetractTraits = withRetractTraits))
+    sb.append(System.lineSeparator)
+
+    sb.append("== Physical Execution Plan ==")
+    sb.append(System.lineSeparator)
+    sb.append(sqlPlan)
+    sb.toString()
   }
 
   /**
@@ -265,7 +305,7 @@ abstract class StreamTableEnvironment(
     name: String,
     dataStream: DataStream[T]): Unit = {
 
-    val (fieldNames, fieldIndexes) = getFieldInfo[T](dataStream.getType)
+    val (fieldNames, fieldIndexes) = getFieldInfo[T](fromLegacyInfoToDataType(dataStream.getType))
     val dataStreamTable = new DataStreamTable[T](
       dataStream,
       fieldIndexes,
@@ -288,14 +328,14 @@ abstract class StreamTableEnvironment(
       dataStream: DataStream[T],
       fields: Array[String]): Unit = {
 
-    val streamType = dataStream.getType
-
     // get field names and types for all non-replaced fields
-    val (fieldNames, fieldIndexes) = getFieldInfo[T](streamType, fields)
+    val (fieldNames, fieldIndexes) = getFieldInfo(
+      fromLegacyInfoToDataType(dataStream.getType), fields)
 
     // TODO: validate and extract time attributes after we introduce [Expression],
     //  return None currently
-    val (rowtime, proctime) = (None, None)
+    val (rowtime, proctime) = validateAndExtractTimeAttributes(
+      fromLegacyInfoToDataType(dataStream.getType), fields)
 
     // check if event-time is enabled
     if (rowtime.isDefined && execEnv.getStreamTimeCharacteristic != TimeCharacteristic.EventTime) {
@@ -314,6 +354,130 @@ abstract class StreamTableEnvironment(
       namesWithIndicatorFields
     )
     registerTableInternal(name, dataStreamTable)
+  }
+
+  /**
+    * Checks for at most one rowtime and proctime attribute.
+    * Returns the time attributes.
+    *
+    * @return rowtime attribute and proctime attribute
+    */
+  // TODO: we should support Expression fields after we introduce [Expression]
+  private[flink] def validateAndExtractTimeAttributes(
+      streamType: DataType,
+      fields: Array[String]): (Option[(Int, String)], Option[(Int, String)]) = {
+
+    val streamLogicalType = LogicalTypeDataTypeConverter.fromDataTypeToLogicalType(streamType)
+
+    val (isRefByPos, fieldTypes) = streamLogicalType match {
+      case c: RowType =>
+        // determine schema definition mode (by position or by name)
+        (isReferenceByPosition(c, fields),
+            (0 until c.getFieldCount).map(i => c.getTypeAt(i)).toArray)
+      case t =>
+        (false, Array(t))
+    }
+
+    var fieldNames: List[String] = Nil
+    var rowtime: Option[(Int, String)] = None
+    var proctime: Option[(Int, String)] = None
+
+    def checkRowtimeType(t: LogicalType): Unit = {
+      if (!(TypeCheckUtils.isLong(t) || TypeCheckUtils.isTimePoint(t))) {
+        throw new TableException(
+          s"The rowtime attribute can only replace a field with a valid time type, " +
+            s"such as Timestamp or Long. But was: $t")
+      }
+    }
+
+    def extractRowtime(idx: Int, name: String, origName: Option[String]): Unit = {
+      if (rowtime.isDefined) {
+        throw new TableException(
+          "The rowtime attribute can only be defined once in a table schema.")
+      } else {
+        // if the fields are referenced by position,
+        // it is possible to replace an existing field or append the time attribute at the end
+        if (isRefByPos) {
+          // aliases are not permitted
+          if (origName.isDefined) {
+            throw new TableException(
+              s"Invalid alias '${origName.get}' because fields are referenced by position.")
+          }
+          // check type of field that is replaced
+          if (idx < fieldTypes.length) {
+            checkRowtimeType(fieldTypes(idx))
+          }
+        }
+        // check reference-by-name
+        else {
+          val aliasOrName = origName.getOrElse(name)
+          streamLogicalType match {
+            // both alias and reference must have a valid type if they replace a field
+            case ct: RowType if ct.getFieldIndex(aliasOrName) != -1 =>
+              val t = ct.getTypeAt(ct.getFieldIndex(aliasOrName))
+              checkRowtimeType(t)
+            // alias could not be found
+            case _ if origName.isDefined =>
+              throw new TableException(s"Alias '${origName.get}' must reference an existing field.")
+            case _ => // ok
+          }
+        }
+
+        rowtime = Some(idx, name)
+      }
+    }
+
+    def extractProctime(idx: Int, name: String): Unit = {
+      if (proctime.isDefined) {
+        throw new TableException(
+          "The proctime attribute can only be defined once in a table schema.")
+      } else {
+        // if the fields are referenced by position,
+        // it is only possible to append the time attribute at the end
+        if (isRefByPos) {
+
+          // check that proctime is only appended
+          if (idx < fieldTypes.length) {
+            throw new TableException(
+              "The proctime attribute can only be appended to the table schema and not replace " +
+                s"an existing field. Please move '$name' to the end of the schema.")
+          }
+        }
+        // check reference-by-name
+        else {
+          streamLogicalType match {
+            // proctime attribute must not replace a field
+            case ct: RowType if ct.getFieldIndex(name) != -1 =>
+              throw new TableException(
+                s"The proctime attribute '$name' must not replace an existing field.")
+            case _ => // ok
+          }
+        }
+        proctime = Some(idx, name)
+      }
+    }
+
+    fields.zipWithIndex.foreach {
+      case ("rowtime", idx) =>
+        extractRowtime(idx, "rowtime", None)
+
+      case ("proctime", idx) =>
+        extractProctime(idx, "proctime")
+
+      case (name, _) => fieldNames = name :: fieldNames
+    }
+
+    if (rowtime.isDefined && fieldNames.contains(rowtime.get._2)) {
+      throw new TableException(
+        "The rowtime attribute may not have the same name as an another field.")
+    }
+
+    if (proctime.isDefined && fieldNames.contains(proctime.get._2)) {
+      throw new TableException(
+        "The proctime attribute may not have the same name as an another field.")
+    }
+
+    (rowtime, proctime)
   }
 
   /**
@@ -342,41 +506,49 @@ abstract class StreamTableEnvironment(
     //  case _ => // ok
     //}
 
+    def register(): Unit = {
+      // register
+      getTable(name) match {
+
+        // check if a table (source or sink) is registered
+        case Some(table: TableSourceSinkTable[_, _]) => table.tableSourceTable match {
+
+          // wrapper contains source
+          case Some(_: TableSourceTable[_]) if !replace =>
+            throw new TableException(s"Table '$name' already exists. " +
+              s"Please choose a different name.")
+
+          // wrapper contains only sink (not source)
+          case Some(_: TableSourceTable[_]) =>
+            val enrichedTable = new TableSourceSinkTable(
+              Some(new TableSourceTable(tableSource, true, statistic)),
+              table.tableSinkTable)
+            replaceRegisteredTable(name, enrichedTable)
+        }
+
+        // no table is registered
+        case _ =>
+          val newTable = new TableSourceSinkTable(
+            Some(new TableSourceTable(tableSource, true, statistic)),
+            None)
+          registerTableInternal(name, newTable)
+      }
+    }
+
     tableSource match {
 
       // check for proper stream table source
-      case streamTableSource: StreamTableSource[_] =>
-        // register
-        getTable(name) match {
+      case streamTableSource: StreamTableSource[_] if !streamTableSource.isBounded =>
+        register()
 
-          // check if a table (source or sink) is registered
-          case Some(table: TableSourceSinkTable[_, _]) => table.tableSourceTable match {
-
-            // wrapper contains source
-            case Some(_: TableSourceTable[_]) if !replace =>
-              throw new TableException(s"Table '$name' already exists. " +
-                s"Please choose a different name.")
-
-            // wrapper contains only sink (not source)
-            case Some(_: StreamTableSourceTable[_]) =>
-              val enrichedTable = new TableSourceSinkTable(
-                Some(new StreamTableSourceTable(streamTableSource)),
-                table.tableSinkTable)
-              replaceRegisteredTable(name, enrichedTable)
-          }
-
-          // no table is registered
-          case _ =>
-            val newTable = new TableSourceSinkTable(
-              Some(new StreamTableSourceTable(streamTableSource)),
-              None)
-            registerTableInternal(name, newTable)
-        }
+      // a lookupable table source can also be registered in the env
+      case _: LookupableTableSource[_] =>
+        register()
 
       // not a stream table source
       case _ =>
-        throw new TableException(
-          "Only StreamTableSource can be registered in StreamTableEnvironment")
+        throw new TableException("Only LookupableTableSource and unbounded StreamTableSource " +
+          "can be registered in StreamTableEnvironment")
     }
   }
 

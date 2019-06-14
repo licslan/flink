@@ -35,8 +35,9 @@ class OverWindowValidationTest extends TableTestBase {
     * Perform optimization for the input Table.
     */
   def optimizeTable(table: Table, updatesAsRetraction: Boolean): Unit = {
-    streamUtil.tableEnv
-      .optimize(table.asInstanceOf[TableImpl].getRelNode, updatesAsRetraction = true)
+    val tableEnv = streamUtil.tableEnv
+    tableEnv.optimizer
+      .optimize(streamUtil.toRelNode(table), updatesAsRetraction = true, tableEnv.getRelBuilder)
   }
 
   /**
@@ -148,6 +149,6 @@ class OverWindowValidationTest extends TableTestBase {
 
     table
     .window(Over orderBy 'rowtime preceding 1.minutes as 'w)
-    .select('c, 'a.count over 'w, 'w.start, 'w.end)
+    .select('c, 'a.count over 'w, 'w.start + 1, 'w.end)
   }
 }
